@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>三维重建预览</title>
+  <link rel="stylesheet" href="/assets/portal.css">
+  <script src="/assets/portal.js" defer></script>
+</head>
+<body>
+  <header><div class="wrap header"><a class="brand" href="/">三维重建预览</a><nav><a href="/workbench/">重建工作台</a><a href="/workbench/#storage-section">存储清理</a><span>局域网共享</span></nav></div></header>
+  <main class="wrap">
+    <div class="intro"><div><h1>重建结果</h1></div><span class="count">共 __COUNT__ 套结果</span></div>
+    <label class="search-label" for="search">查找结果</label>
+    <input id="search" type="search" placeholder="搜索备注名、编号或日期" autocomplete="off">
+    <div class="list-head" aria-hidden="true"><span>预览内容</span><span>更新时间</span><span>操作</span></div>
+    <section id="results" aria-label="重建结果列表">__ENTRIES__</section>
+    <p id="empty" hidden>暂无重建结果</p>
+
+  </main>
+  <footer class="wrap"><span>仅供影像重建交流 / 自动分割结果需人工复核</span><span>目录更新：__UPDATED__</span></footer>
+  <div id="notice" role="status" aria-live="polite"></div>
+  <dialog id="share-dialog"><h2>分享链接</h2><p>复制下方地址，在可访问此局域网的设备上打开。</p><input id="share-url" aria-label="分享链接" readonly><button id="close-share" type="button">关闭</button></dialog>
+</body>
+</html>

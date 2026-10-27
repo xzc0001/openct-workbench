@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; connect-src 'none'; font-src 'none'; worker-src 'none'; base-uri 'none'; form-action 'none'">
+<link rel="icon" href="data:,">
+<title>影像预览</title>
+<style>__STYLE__</style>
+</head>
+<body>
+<header>
+ <h1>影像预览</h1><span id="summary">正在加载</span>
+ <div class="header-actions"><button id="grid">四宫格</button><button id="about">检查信息</button><button id="capture">截图</button></div>
+</header>
+<main>
+ <section id="workspace" aria-label="四宫格影像预览">
+  <section class="panel" id="panel-coronal" data-view="coronal">
+   <div class="panel-head"><strong>冠状位</strong><span class="position"></span><button class="expand" data-view="coronal" aria-label="放大冠状位">放大</button></div>
+   <div class="image-host" title="滚轮翻层，右键拖动调窗"><canvas id="coronal" aria-label="冠状位图像"></canvas><span class="direction top">S</span><span class="direction bottom">I</span><span class="direction left">R</span><span class="direction right">L</span></div>
+   <div class="slice-controls"><button class="prev" data-view="coronal" aria-label="冠状位前一层">−</button><input type="range" class="slice" data-view="coronal" aria-label="冠状位层面"><button class="next" data-view="coronal" aria-label="冠状位后一层">＋</button></div>
+  </section>
+  <section class="panel" id="panel-axial" data-view="axial">
+   <div class="panel-head"><strong id="axial-title">横切（原图）</strong><span class="position"></span><button class="expand" data-view="axial" aria-label="放大横切原图">放大</button></div>
+   <div class="image-host" title="滚轮翻层，右键拖动调窗"><canvas id="axial" aria-label="横切原图"></canvas><span class="direction top">A</span><span class="direction bottom">P</span><span class="direction left">R</span><span class="direction right">L</span></div>
+   <div class="slice-controls"><button class="prev" data-view="axial" aria-label="横切前一层">−</button><input type="range" class="slice" data-view="axial" aria-label="横切原图层号"><button class="next" data-view="axial" aria-label="横切后一层">＋</button></div>
+  </section>
+  <section class="panel" id="panel-sagittal" data-view="sagittal">
+   <div class="panel-head"><strong>矢状位</strong><span class="position"></span><button class="expand" data-view="sagittal" aria-label="放大矢状位">放大</button></div>
+   <div class="image-host" title="滚轮翻层，右键拖动调窗"><canvas id="sagittal" aria-label="矢状位图像"></canvas><span class="direction top">S</span><span class="direction bottom">I</span><span class="direction left">A</span><span class="direction right">P</span></div>
+   <div class="slice-controls"><button class="prev" data-view="sagittal" aria-label="矢状位前一层">−</button><input type="range" class="slice" data-view="sagittal" aria-label="矢状位层面"><button class="next" data-view="sagittal" aria-label="矢状位后一层">＋</button></div>
+  </section>
+  <section class="panel" id="panel-three" data-view="three">
+   <div class="panel-head"><strong>三维</strong><span class="position" id="picked"></span><button class="expand" data-view="three" aria-label="放大三维">放大</button></div>
+   <div id="renderHost" title="拖动旋转，滚轮缩放，右键平移"><div class="view-buttons"><button data-camera="anterior" title="前方视角">前</button><button data-camera="posterior" title="后方视角">后</button><button data-camera="right" title="右侧视角">右</button><button data-camera="superior" title="上方视角">上</button></div><canvas id="axis" width="160" height="160" aria-label="三维方向"></canvas></div>
+  </section>
+ </section>
+ <aside aria-label="预览控制">
+  <div class="control-bar"><div class="control-tabs" role="tablist" aria-label="预览控制分类"><button id="tab-models" role="tab" aria-selected="true" aria-controls="controls-models" data-controls="models">模型</button><button id="tab-display" role="tab" aria-selected="false" aria-controls="controls-display" data-controls="display" tabindex="-1">显示</button><button id="tab-position" role="tab" aria-selected="false" aria-controls="controls-position" data-controls="position" tabindex="-1">定位</button></div><button id="reset" class="quiet-button" title="重置视角与窗位">重置</button></div>
+  <div class="control-feedback"><p id="render-notice" class="notice" role="status" hidden></p><button id="reload-three" hidden>重新加载预览</button></div>
+  <div class="control-content">
+   <section id="controls-models" role="tabpanel" aria-labelledby="tab-models">
+    <input id="layer-search" type="search" placeholder="查找模型" aria-label="查找模型" autocomplete="off">
+    <div class="layer-columns"><label><input id="layer-all" type="checkbox"><span id="layer-all-label">全部模型</span><output id="layer-count"></output></label><span>不透明度</span></div>
+    <p id="models-status" class="notice" role="status" hidden></p><div id="layers"></div><p id="layer-empty" class="empty-state" hidden>未找到模型</p>
+   </section>
+   <section id="controls-display" role="tabpanel" aria-labelledby="tab-display" hidden>
+    <section class="settings native-volume">
+     <h2>三维显示</h2>
+     <label class="field">显示方式<select id="ct-render-mode"><option value="surface">结构表面</option><option value="volume" selected>CT 容积渲染</option><option value="iso">CT 等值面</option></select></label>
+     <div id="ct-volume-options">
+      <div class="field-action"><label class="field">显示范围<select id="ct-scope"><option value="">全部影像</option></select></label><button id="ct-fit" title="适配当前显示范围">适配</button></div>
+      <details class="advanced"><summary>灰度参数</summary><label class="field">灰度预设<select id="ct-preset"><option value="structures" disabled>按模型映射</option><option value="bone">骨骼</option><option value="soft">软组织</option><option value="vessels">血管</option><option value="airway">气道</option><option value="lung">肺组织</option><option value="nodule">低密度区域</option></select></label><div class="field-pair"><label class="field">阈值 HU<input id="ct-threshold" type="number" min="-1024" max="3000" value="220" step="10"></label><label class="field">映射宽度 HU<input id="ct-window" type="number" min="1" max="4000" value="700" step="10"></label></div><label class="field">不透明强度<input id="ct-density" type="range" min="0.01" max="5" value="2.2" step="0.01"></label><label class="check"><input id="ct-soft-light" type="checkbox" checked>柔和光照</label></details>
+      <details class="advanced"><summary>渲染信息</summary><p id="ct-volume-info" class="technical"></p></details>
+     </div>
+     <label class="field" for="render-quality">显示质量<select id="render-quality"><option value="light">轻量</option><option value="balanced">标准</option><option value="full">完整表面</option></select></label>
+     <label class="check"><input id="interaction-quality" type="checkbox" checked>旋转时降低画质</label>
+     <div id="surface-controls"><label class="check sub-check"><input id="interaction-context" type="checkbox" checked>临时隐藏透明肺部模型</label><details class="advanced"><summary>渲染信息</summary><p id="render-stats" class="technical">按需绘制</p></details></div>
+    </section>
+    <section class="settings">
+     <h2>CT 显示</h2><div class="presets"><button data-window="lung" class="active" aria-pressed="true">肺窗</button><button data-window="soft" aria-pressed="false">纵隔窗</button><button data-window="bone" aria-pressed="false">骨窗</button></div>
+     <div class="field-pair"><label class="field">窗宽 HU<input type="number" id="ww" min="1" max="10000" value="1500"></label><label class="field">窗位 HU<input type="number" id="wl" min="-3000" max="10000" value="-600"></label></div>
+     <div class="check-grid"><label class="check"><input type="checkbox" id="overlay">分割叠加</label><label class="check"><input type="checkbox" id="boundaries">分割边界</label><label class="check"><input type="checkbox" id="crosshair" checked>定位线</label><label class="check"><input type="checkbox" id="planes">三维切片平面</label><label class="check"><input type="checkbox" id="clip">按横切层面剖切</label></div>
+    </section>
+    <section class="settings playback">
+     <div class="section-heading"><h2>旋转</h2><button id="auto-play" aria-pressed="false">播放旋转</button></div>
+     <label class="check"><input id="rotation-momentum" type="checkbox">旋转动量</label>
+     <label class="field range-field">旋转速度<output id="rotation-speed-value">10°/s</output><input id="rotation-speed" aria-label="旋转速度" type="range" min="1" max="60" value="10"></label>
+     <label class="field">旋转中心<select id="rotation-center"><option value="view">视图中心</option><option value="model">模型中心</option><option value="focus">定位点</option></select></label>
+    </section>
+   </section>
+   <section id="controls-position" role="tabpanel" aria-labelledby="tab-position" hidden>
+    <section class="settings">
+     <h2>目标定位</h2><div class="field-action"><select id="target" aria-label="选择候选区域"><option value="">选择候选区域</option></select><button id="focus" disabled>定位</button></div>
+     <div id="margin-controls" hidden><label class="check"><input type="checkbox" id="confirm">已核对目标，显示外扩参考</label><p id="margin-note" class="muted">仅为几何参考</p></div>
+    </section>
+    <section class="settings"><div class="section-heading"><h2>当前坐标</h2><button id="copy-focus">复制坐标</button></div><div id="coordinates" class="coordinates"></div><label class="check"><input id="focus-marker" type="checkbox">显示定位标记</label></section>
+    <section class="settings"><div class="section-heading"><h2>人工标记</h2><button id="export-marks" disabled title="导出标记 JSON">导出</button></div><button id="mark" aria-pressed="false">添加标记</button><div id="marks"></div></section>
+   </section>
+  </div>
+ </aside>
+</main>
+<footer><span id="status">正在加载影像</span><span id="resource-status">离线预览</span></footer>
+<div id="loading">正在加载影像与模型</div>
+<dialog id="details"><div class="dialog-heading"><h2>检查信息</h2><button id="close-details">关闭</button></div><p id="source-info"></p><p id="method"></p><p>自动分割结果待人工复核。候选区域、肋骨编号与人工标记均不代表诊断结论。</p><p>横切图使用源 CT 像素；冠状位、矢状位按物理坐标重建。分割边界来自处理网格，并映射至源影像。</p><p>完整表面未经几何平滑或简化，轻量与标准表面用于浏览。柔和光照仅改变显示。</p><p>几何外扩参考不等同于手术安全切缘，不自动确定术式或可切除性。</p><p>肺段与骨折自动定位未配置专用模型。</p></dialog>
+<script>__THREE__</script><script>__ORBIT__</script>__BINARY_ASSETS__<script id="sceneData" type="application/json">__SCENE_DATA__</script><script id="ctData" type="application/json">__CT_DATA__</script><script id="volumeRoiData" type="application/json">__VOLUME_ROIS__</script><script>__LOADER__</script><script>__UI__</script><script>__VOLUME_RENDERER__</script><script>__PERFORMANCE__</script><script>__INTERACTIONS__</script><script>__PLACEHOLDERS__</script><script>__PROGRESSIVE__</script><script>__APP__</script>
+</body>
+</html>
