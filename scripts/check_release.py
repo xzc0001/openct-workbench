@@ -22,8 +22,9 @@ ALLOWED_DOMAINS={
     'nipy.org','vtk.org','numpy.org','scipy.org','scikit-image.org',
     'python-pillow.org','www.radix-ui.com','nginx.org','www.python.org',
     'nodejs.org','systemd.io','www.w3.org','developer.mozilla.org','discourse.threejs.org',
+    'cryptography.io','playwright.dev','docs.github.com',
 }
-FORBIDDEN_PARTS={'jobs','cache','exports','auth','run','weights','runtime',
+FORBIDDEN_PARTS={'jobs','cache','exports','auth','run','weights','runtime','cluster-state','.qa-runtime',
                  'records','public','incoming','revisions','node_modules','__pycache__'}
 ALLOWED_SUFFIXES={'.py','.js','.cjs','.css','.html','.md','.txt','.json','.yml','.yaml'}
 RULES={

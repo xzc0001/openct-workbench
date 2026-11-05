@@ -6,6 +6,16 @@
 
 > 研究与工程验证用途。自动分割、候选区域、骨骼编号和几何外扩参考均需人工复核，不能直接用于诊断、手术决策或替代获批的医疗软件。无专用肺段或骨折定位模型。
 
+项目文档：[Wiki](https://github.com/xzc0001/openct-workbench/wiki) · [Wiki 源文件](docs/wiki/Home.md) · [更新记录](CHANGELOG.md)。Wiki 文档在仓库中保留可审查副本，便于 Fork 后维护自己的内部文档。
+
+## 最近更新
+
+- 检查默认按所有者隔离，只读账号需获得检查级授权；管理员可撤销授权。账号管理、节点管理和系统清理由权限控制。
+- 管理员可为指定检查生成限时、可撤销的只读访客链接，默认有效期 7 天；访客不能下载、重建或管理检查。
+- 预览包可导出、校验并导入；接收端重建自己的页面模板，保留数据哈希和历史版本。跨工作台发送需在本地明确配置目标。
+- 增加 A4 多视图打印排版、视频与容积交互相关改进；机构、患者及标识字段默认为空，由使用者在本地填写。
+- 增加可选计算节点协调器、租约与产物验证、工作台桥接和无节点时的本地回退。默认示例不配置集群，不包含原有客户端、引擎或模型包。
+
 ## 项目亮点
 
 - **从上传到离线交付**：目录或 ZIP 上传、任务队列、进度展示、预览与离线下载组成完整流程；原始输入与派生结果分开管理。
@@ -25,13 +35,14 @@ workbench/         Python HTTP 服务、重建管线和合成回归测试
   offline_guard/   计算进程的 Python 网络保护
   qa/              无病例载荷的 JavaScript 单元测试
 portal/            可选的离线 HTML 版本化静态发布工具
+cluster/           可选计算节点协调、TLS 网关、签名与合成测试
 scripts/           本地初始化与发布前检查
 docs/              部署、隐私、依赖与验证说明
 ```
 
 ## 快速开始
 
-建议 Python 3.11 / 3.12、64 位操作系统。CPU 推理可运行但耗时，内存需求与体积和结构有关；先用合成数据完成安装验证。Linux 可选资源隔离；Windows 不启用 cgroup 功能。浏览器建议支持 WebGL2 与浮点线性采样，受显卡纹理尺寸与内存限制，不支持时可回退到表面显示。
+建议 Python 3.12 / 3.13、64 位操作系统。CPU 推理可运行但耗时，内存需求与体积和结构有关；先用合成数据完成安装验证。Linux 可选资源隔离；Windows 不启用 cgroup 功能。浏览器建议支持 WebGL2 与浮点线性采样，受显卡纹理尺寸与内存限制，不支持时可回退到表面显示。
 
 ```bash
 git clone https://github.com/xzc0001/openct-workbench.git
@@ -68,6 +79,7 @@ python workbench/server.py
 ```bash
 python scripts/check_release.py
 python -m unittest discover -s workbench -p "test_*.py"
+python -m unittest discover -s cluster/tests -t . -p "test_*.py"
 ```
 
 测试使用临时目录、生成的数组与 DICOM 字节，不读取真实病例。Node.js 18+ 可启用 JavaScript 合约测试，未安装时对应测试会跳过。运行全套测试需要上述医学图像依赖；无需下载模型权重。测试结果及首版检查范围见 [验证记录](docs/VALIDATION.md)。
@@ -86,6 +98,7 @@ python -m unittest discover -s workbench -p "test_*.py"
 | [Three.js / OrbitControls](https://threejs.org/) | 浏览器三维交互与 WebGL 渲染，随附 MIT 声明 |
 | [Radix Colors](https://www.radix-ui.com/colors) | 颜色设计来源，随附 MIT 声明 |
 | [NGINX](https://nginx.org/) | 可选内部反向代理 |
+| [cryptography](https://cryptography.io/) | 可选计算节点证书、签名与密码学验证 |
 | [3D Slicer](https://www.slicer.org/) | 可选独立复核工具；未随附，不是运行服务的必需依赖 |
 
 原创工程部分按 [MIT](LICENSE) 提供；第三方代码和模型权重分别遵循各自许可。无任何机构、上游项目或医疗产品的背书。

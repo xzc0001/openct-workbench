@@ -53,5 +53,12 @@ run/
 **/__pycache__/
 **/*.pyc
 node_modules/
+cluster-state/
+.qa-runtime/
+workbench/qa/print-synthetic-*
+**/*.crt
+**/*.cer
+**/*.csr
+**/*.sig
 .DS_Store
 Thumbs.db

@@ -76,7 +76,7 @@ def mesh_assets(model, assets):
     return result
 
 
-def write_preview(output, scene, ct, rois, slabs=None, notify=lambda message:None, resolver=None, before_publish=None, online_base=None):
+def write_preview(output, scene, ct, rois, slabs=None, notify=lambda message:None, resolver=None, before_publish=None, online_base=None, retain_generation=None):
     output = Path(output)
     generation = uuid.uuid4().hex
     online = output/'online'/generation
@@ -140,7 +140,7 @@ def write_preview(output, scene, ct, rois, slabs=None, notify=lambda message:Non
             pointer.write_text(json.dumps({'generation':generation}),encoding='utf-8')
             pointer.replace(output/'online/current.json')
             for old in (output/'online').iterdir():
-                if old.is_dir() and old.name!=generation and re.fullmatch('[a-f0-9]{32}',old.name):
+                if old.is_dir() and old.name not in {generation,retain_generation} and re.fullmatch('[a-f0-9]{32}',old.name):
                     if old.is_symlink():raise ValueError('Invalid generated preview directory')
                     shutil.rmtree(old)
         counts={q:sum(m.get('lod',{}).get(q,m)['triangles'] for m in scene['models']) for q in ('light','balanced','full')}
@@ -207,10 +207,19 @@ def upgrade(path, notify=print, scene_override=None, rebuild_lods=False):
     return receipt
 
 
-def refresh_indexed(path, scene_override=None, rebuild_lods=False):
+def refresh_indexed(path, scene_override=None, rebuild_lods=False, require_completed=False, keep_previous=False):
     from preview_access import Preview
     path=Path(path);output=path.parent
-    pointer=json.loads((output/'online/current.json').read_text())
+    initial=path.stat()
+    pointer_path=output/'online/current.json'
+    pointer=json.loads(pointer_path.read_text())
+    def guard():
+        current=path.stat()
+        if (current.st_ino,current.st_size,current.st_mtime_ns)!=(initial.st_ino,initial.st_size,initial.st_mtime_ns) or json.loads(pointer_path.read_text())!=pointer:
+            raise ValueError('Preview changed during refresh')
+        status=output.parent/'status.json'
+        if require_completed and status.is_file() and json.loads(status.read_text(encoding='utf-8'))['state']!='completed':
+            raise ValueError('Study became active during refresh')
     previous=Preview(output/'online'/pointer['generation'])
     scene=scene_override or previous.index['scene']
     if rebuild_lods:
@@ -222,7 +231,7 @@ def refresh_indexed(path, scene_override=None, rebuild_lods=False):
     if review.is_file():
         rows=json.loads(review.read_text(encoding='utf-8'))['candidates']
         scene={**scene,'review_candidates':[row for row in rows if row['id'] not in {m['id'] for m in scene['models']}]}
-    receipt=write_preview(output,scene,previous.ct,previous.index['rois'],resolver=previous.compressed)
+    receipt=write_preview(output,scene,previous.ct,previous.index['rois'],resolver=previous.compressed,before_publish=guard,retain_generation=pointer['generation'] if keep_previous else None)
     manifest=output/'manifest.json';data=json.loads(manifest.read_text(encoding='utf-8'))
     data.update(receipt);temporary=manifest.with_suffix('.tmp');temporary.write_text(json.dumps(data,ensure_ascii=False,indent=2),encoding='utf-8');temporary.replace(manifest)
     return receipt

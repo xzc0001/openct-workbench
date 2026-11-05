@@ -25,3 +25,8 @@ Validate on the intended platform, then produce a local full freeze / lock file,
 retain wheel hashes and inventory weights separately. Do not publish a freeze
 that contains private indexes, embedded authentication or local user paths.
 Run `python -m pip check` and the synthetic tests after each dependency change.
+
+The optional cluster uses `cryptography==50.0.2` for certificates and signatures.
+Its namespace and synthetic engine identifiers are generic to this public
+foundation. External native clients and engine packages are not bundled, and
+their compatibility must be established separately.

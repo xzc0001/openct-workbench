@@ -1,0 +1,33 @@
+'use strict';
+const assert=require('node:assert'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
+const THREE=require('../assets/three.min.js');global.window=global;
+Object.defineProperty(global,'navigator',{value:{deviceMemory:Number(process.argv[2]||8)},configurable:true});
+global.ViewerUI={rgb:()=>[.5,.5,.5],palette:{}};
+global.ViewerLighting={volumeAmbient:.5,volumeDiffuse:.5,direction:[0,0,1]};
+const elements=new Map();
+for(const id of ['ct-render-mode','ct-preset','ct-scope','ct-volume-info','ct-volume-options','surface-controls','ct-threshold','ct-window','ct-density','ct-soft-light','clip','ct-fit','render-quality','renderHost']){
+  elements.set(id,{value:'',checked:false,hidden:false,disabled:false,textContent:'',options:[],append(o){this.options.push(o)},clientWidth:800,clientHeight:600});
+}
+elements.get('ct-render-mode').value='surface';elements.get('ct-preset').value='bone';
+elements.get('render-quality').options=[{},{},{}];
+global.document={querySelector:s=>elements.get(s.slice(1)),createElement:()=>({})};
+vm.runInThisContext(fs.readFileSync(path.join(__dirname,'../assets/native-volume.js'),'utf8'));
+const size=[512,512,538],spacing=[.6,.6,.625],C={size,spacing,dtype:'int16',origin:[0,0,0],matrix:[[.6,0,0],[0,.6,0],[0,0,.625]],direction:[[1,0,0],[0,1,0],[0,0,1]],bounds:[[0,0,0],[307,307,336]],original:true};
+const roi={group:'layers',size:[429,292,471],origin_lps:[0,0,0],spacing:[.6,.6,.625],encoding:'uint8_gzip',model_ids:[],data:{}};
+let loads=0,calls=[];const source={regionBounds:()=>({start:[0,0,0],size}),async region(scope,budget,stride){calls.push({scope,budget,stride});return{data:new Int16Array(1),size:size.map((n,k)=>Math.ceil(n/stride[k])),origin:C.origin,matrix:C.matrix.map(row=>row.map((n,k)=>n*stride[k])),spacing:C.spacing.map((n,k)=>n*stride[k])}},async load(){loads++;const raw=new Uint8Array(roi.size.reduce((a,b)=>a*b,1));raw[10+roi.size[0]*(20+roi.size[1]*30)]=7;return raw.buffer}};
+const gl={MAX_3D_TEXTURE_SIZE:1,NO_ERROR:0,getParameter:()=>2048,isContextLost:()=>false,getError:()=>0};
+const renderer={capabilities:{isWebGL2:true},extensions:{has:()=>true},getContext:()=>gl,initTexture(){}};
+const scene=new THREE.Scene(),camera=new THREE.PerspectiveCamera(40,1,.1,10000);camera.position.set(0,0,100);
+const controls={target:new THREE.Vector3(),update(){}},modelGroup=new THREE.Group();scene.add(modelGroup);
+(async()=>{const view=createNativeCTVolume({THREE,renderer,scene,camera,controls,C,source,modelGroup,rois:{rois:[roi]},state:{quality:'full',point:[0,0,0]},invalidate(){}});await view.ready;
+ await view.setMode('iso');assert(view.active);assert.equal(view.mode,'iso');assert(calls[0].stride.some(n=>n>1));const bytes=view.allocatedBytes;assert.equal(loads,1);
+ const plan=planCTVolumeSampling(size,roi.size,2,(navigator.deviceMemory<=4?64:128)*1024**2,2048),step=plan.roiStride,shape=roi.size.map((n,k)=>Math.ceil(n/step[k]));
+ const index=[10,20,30].map((n,k)=>n/step[k]);assert(index.every(Number.isInteger));
+ assert.equal(view.uniforms.uROI.value.image.data[index[0]+shape[0]*(index[1]+shape[1]*index[2])],7);
+ const world=new THREE.Vector4(-roi.spacing[0]*10,-roi.spacing[1]*20,roi.spacing[2]*30,1),q=world.clone().applyMatrix4(view.uniforms.uTexToWorld.value.clone().invert()).applyMatrix4(view.uniforms.uTexToRoi.value);
+ for(const [actual,expected] of [[q.x,(index[0]+.5)/shape[0]],[q.y,(index[1]+.5)/shape[1]],[q.z,(index[2]+.5)/shape[2]]])assert(Math.abs(actual-expected)<1e-6);
+ view.beforeRender(false,'full');assert(elements.get('ct-volume-info').textContent.includes('三维显示已降采样'));
+ await view.setMode('volume');assert(view.active);assert.equal(view.mode,'volume');assert.equal(loads,1);assert.equal(view.allocatedBytes,bytes);
+ await view.setMode('surface');assert(!view.active);assert.equal(view.allocatedBytes,0);
+ console.log('Budgeted CT modes activate, report reduced sampling and reuse ROI texture');
+})().catch(e=>{console.error(e);process.exit(1)});

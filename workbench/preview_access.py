@@ -79,21 +79,27 @@ class Preview:
             result[row:row+len(y)]=self.sample([start[k]+dy[k]*y+dx[k]*x for k in range(3)])
         return result
 
-    def volume(self, scope, budget):
+    def volume(self, scope, budget, stride=None):
         budget=min(128*1024**2,int(budget))
         start,size=region(self.ct,self.index['rois'],scope)
-        if int(np.prod(size))*self.dtype.itemsize>budget:raise ValueError('该范围超出显存预算，请缩小显示范围或使用结构表面')
-        result=np.empty(tuple(size[::-1]),dtype=self.dtype)
+        stride=np.array(stride if stride is not None else [1,1,1])
+        if stride.shape!=(3,) or not np.issubdtype(stride.dtype,np.integer) or np.any(stride<1) or np.any(stride>32):raise ValueError('Invalid volume sampling stride')
+        out_size=(size+stride-1)//stride
+        if int(np.prod(out_size))*self.dtype.itemsize>budget:raise ValueError('该范围超出显存预算，请缩小显示范围或使用结构表面')
+        result=np.empty(tuple(out_size[::-1]),dtype=self.dtype)
         tx,ty,tz=self.ct['tile_size'];nx=(self.ct['size'][0]+tx-1)//tx;ny=(self.ct['size'][1]+ty-1)//ty
         end=start+size
         for z in range(start[2]//tz,(end[2]+tz-1)//tz):
             for y in range(start[1]//ty,(end[1]+ty-1)//ty):
                 for x in range(start[0]//tx,(end[0]+tx-1)//tx):
                     index=x+nx*(y+ny*z);brick=self.ct['tiles'][index];a=np.maximum(start,brick['start']);b=np.minimum(end,np.array(brick['start'])+brick['size'])
-                    src=tuple(slice(int(v),int(w)) for v,w in zip((a-brick['start'])[::-1],(b-brick['start'])[::-1]))
-                    dst=tuple(slice(int(v),int(w)) for v,w in zip((a-start)[::-1],(b-start)[::-1]))
+                    first=np.maximum(0,(a-start+stride-1)//stride);last=np.minimum(out_size,(b-start+stride-1)//stride)
+                    if np.any(first>=last):continue
+                    source_start=start+first*stride-np.array(brick['start']);source_end=start+last*stride-np.array(brick['start'])
+                    src=tuple(slice(int(v),int(w),int(step)) for v,w,step in zip(source_start[::-1],source_end[::-1],stride[::-1]))
+                    dst=tuple(slice(int(v),int(w)) for v,w in zip(first[::-1],last[::-1]))
                     result[dst]=self.tile(index)[src]
-        return result,start,size
+        return result,start,out_size
 
 
 def region(ct,rois,scope):

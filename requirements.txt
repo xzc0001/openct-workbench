@@ -11,3 +11,4 @@ scikit-image==0.26.0
 pydicom==3.0.2
 nibabel==5.4.2
 Pillow==12.3.0
+cryptography==50.0.2

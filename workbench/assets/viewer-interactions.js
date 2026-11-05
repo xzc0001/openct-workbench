@@ -29,3 +29,101 @@ window.createViewerInteractions=function({D,C,state,views,scene,camera,controls,
  const allTargets=[...(D.nodules||[]),...(D.review_candidates||[])];const requested=new URLSearchParams(location.hash.slice(1)).get('review');if(requested){const target=allTargets.find(n=>n.id===requested),p=target?.center_ras_mm;if(p){$('#target').value=requested;state.point=[-p[0],-p[1],p[2]];draw()}}
  sync();return{sync,marker,stop,rotationCenter,get playing(){return playing}};
 };
+
+'use strict';
+// Record only rendered 3D frames in the browser; no CT or video is uploaded.
+window.createThreeVideoRecorder=function({renderer,renderController,download}){
+ const button=document.querySelector('#record-three'),status=document.querySelector('#record-status');
+ const canvas=document.createElement('canvas'),limitMs=5*60*1000,limitBytes=256*1024**2;
+ let recorder=null,stream=null,track=null,chunks=[],bytes=0,started=0,reason='',discard=false;
+ function label(active){button.textContent=active?'停止并保存':'录制三维';button.setAttribute('aria-pressed',String(active))}
+ function release(){if(stream)for(const t of stream.getTracks())t.stop();stream=track=null}
+ function stop(message=''){
+  if(!recorder||recorder.state==='inactive')return;
+  reason=message;button.disabled=true;renderController.setCapture(null);recorder.stop();
+ }
+ if(renderer.disabled||typeof MediaRecorder==='undefined'||typeof canvas.captureStream!=='function'){
+  button.disabled=true;button.title='当前浏览器不支持三维视频录制';return{stop,get recording(){return false}};
+ }
+ button.disabled=false;
+ button.onclick=()=>{
+  if(recorder&&recorder.state!=='inactive'){stop();return}
+  if(document.hidden){status.textContent='请先显示预览页面';return}
+  try{
+   const source=renderer.domElement,w=source.width,h=source.height;
+   if(!w||!h)throw Error('三维视窗尚未就绪');
+   const scale=Math.min(1,1920/w,1080/h);canvas.width=Math.max(2,Math.floor(w*scale/2)*2);canvas.height=Math.max(2,Math.floor(h*scale/2)*2);
+   const context=canvas.getContext('2d',{alpha:false});if(!context)throw Error('无法创建录制画面');
+   try{stream=canvas.captureStream(0);track=stream.getVideoTracks()[0];if(!track||typeof track.requestFrame!=='function'){release();stream=canvas.captureStream(30);track=stream.getVideoTracks()[0]}}
+   catch(error){release();stream=canvas.captureStream(30);track=stream.getVideoTracks()[0]}
+   if(!track)throw Error('无法创建视频轨道');
+   const candidates=['video/webm;codecs=vp9','video/webm;codecs=vp8','video/webm'];
+   const mime=typeof MediaRecorder.isTypeSupported==='function'?candidates.find(type=>MediaRecorder.isTypeSupported(type)):undefined;
+   recorder=new MediaRecorder(stream,{...(mime?{mimeType:mime}:{}),videoBitsPerSecond:4000000});
+   chunks=[];bytes=0;reason='';discard=false;started=performance.now();
+   recorder.ondataavailable=event=>{if(event.data?.size){chunks.push(event.data);bytes+=event.data.size;if(bytes>=limitBytes)stop('已达到录制大小上限')}};
+   recorder.onerror=()=>{reason='录制中断';renderController.setCapture(null);if(recorder.state!=='inactive')stop(reason)};
+   recorder.onstop=()=>{
+    renderController.setCapture(null);release();label(false);button.disabled=false;
+    if(discard){chunks=[];status.textContent='';return}
+    const type=recorder.mimeType||mime||'video/webm',blob=new Blob(chunks,{type});chunks=[];
+    if(!blob.size){status.textContent=reason||'未生成视频，请重试';return}
+    try{download(blob,'three-dimensional-view.'+(type.startsWith('video/mp4')?'mp4':'webm'));status.textContent=reason||'视频已保存'}
+    catch(error){status.textContent='视频保存失败，请重试'}
+   };
+   recorder.start(1000);label(true);status.textContent='录制中 00:00';
+   renderController.setCapture(frame=>{
+    try{
+     const fit=Math.min(canvas.width/frame.width,canvas.height/frame.height),width=frame.width*fit,height=frame.height*fit;
+     context.fillStyle='#111113';context.fillRect(0,0,canvas.width,canvas.height);context.drawImage(frame,(canvas.width-width)/2,(canvas.height-height)/2,width,height);
+     track?.requestFrame?.();const elapsed=Math.max(0,Math.floor((performance.now()-started)/1000));
+     status.textContent='录制中 '+String(Math.floor(elapsed/60)).padStart(2,'0')+':'+String(elapsed%60).padStart(2,'0');
+     if(elapsed*1000>=limitMs)stop('已达到录制时长上限');
+    }catch(error){stop('录制中断')}
+   });
+  }catch(error){renderController.setCapture(null);release();recorder=null;label(false);button.disabled=false;status.textContent=error.message||'无法开始录制'}
+ };
+ document.addEventListener('visibilitychange',()=>{if(document.hidden)stop('页面切换，录制已结束')});
+ document.addEventListener('viewer-three-paused',()=>stop('三维显示中断，录制已结束'));
+ window.addEventListener('pagehide',()=>{discard=true;stop();release()});
+ return{stop,get recording(){return !!recorder&&recorder.state!=='inactive'}};
+};
+/* A4 image sheet, with patient details kept only in this page. */
+window.createViewerPrintComposer=function({renderer,renderController}){
+ const q=s=>document.querySelector(s),open=q('#print-open'),panel=q('#print-composer'),sheet=q('#print-sheet'),views=q('#print-views'),add=q('#print-add'),output=q('#print-output'),message=q('#print-message'),count=q('#print-count');
+ const items=[];let logoURL=null;
+ const element=(tag,klass,text)=>{const node=document.createElement(tag);if(klass)node.className=klass;if(text!==undefined)node.textContent=text;return node};
+ const decoded=image=>typeof image.decode==='function'?image.decode():new Promise((resolve,reject)=>{if(image.complete)return image.naturalWidth?resolve():reject(Error('图片读取失败'));image.onload=resolve;image.onerror=reject});
+ function sync(){
+  views.replaceChildren();count.textContent=items.length+' / 9';add.disabled=items.length>=9||!!renderer.disabled;output.disabled=!items.length;
+  items.forEach((item,index)=>{
+   const row=element('div','print-view'),img=element('img');img.src=item.url;img.alt='视角 '+(index+1);const label=element('input');label.type='text';label.maxLength=32;label.value=item.label;label.setAttribute('aria-label','视角名称 '+(index+1));label.oninput=()=>{item.label=label.value};
+   const up=element('button',null,'上移'),down=element('button',null,'下移'),remove=element('button',null,'移除');up.type=down.type=remove.type='button';up.disabled=index===0;down.disabled=index===items.length-1;
+   up.onclick=()=>{[items[index-1],items[index]]=[items[index],items[index-1]];sync()};down.onclick=()=>{[items[index+1],items[index]]=[items[index],items[index+1]];sync()};remove.onclick=()=>{URL.revokeObjectURL(item.url);items.splice(index,1);sync()};
+   const controls=element('div','print-view-actions');controls.append(up,down,remove);const detail=element('div','print-view-detail');detail.append(label,controls);row.append(img,detail);views.append(row);
+  });
+ }
+ async function capture(){
+  if(items.length>=9||renderer.disabled)return;add.disabled=true;message.textContent='';
+  try{
+   renderController.renderNow();const blob=await new Promise(resolve=>renderer.domElement.toBlob(resolve,'image/png'));
+   if(!blob||!blob.size)throw Error('截图失败，请重试');items.push({url:URL.createObjectURL(blob),label:'视角 '+(items.length+1)});sync();
+  }catch(error){message.textContent=error.message||'截图失败';sync()}
+ }
+ function build(){
+  sheet.replaceChildren();const header=element('header','print-sheet-header'),identity=element('div','print-sheet-identity');
+  if(logoURL){const logo=element('img','print-sheet-logo');logo.src=logoURL;logo.alt='机构标识';header.append(logo)}
+  identity.append(element('div','print-sheet-institution',q('#print-institution').value.trim()),element('h1',null,'三维重建影像'));
+  header.append(identity);sheet.append(header);
+  const patient=element('div','print-sheet-patient');for(const [label,id] of [['姓名','#print-patient'],['性别','#print-sex'],['年龄','#print-age'],['检查号','#print-id'],['检查日期','#print-date']]){
+   const part=element('div','print-sheet-patient-field'),name=element('span','print-sheet-label',label+'：'),value=element('span','print-sheet-value',q(id).value.trim()||'');part.append(name,value);patient.append(part);
+  }
+  sheet.append(patient);const grid=element('div','print-sheet-grid');grid.dataset.count=String(items.length);
+  for(const item of items){const figure=element('figure','print-sheet-view'),img=element('img');img.src=item.url;img.alt=item.label||'三维视角';figure.append(img,element('figcaption',null,item.label.trim()));grid.append(figure)}sheet.append(grid);return [...sheet.querySelectorAll('img')];
+ }
+ open.disabled=false;open.onclick=()=>{panel.hidden=!panel.hidden;if(!panel.hidden)message.textContent=''};q('#print-close').onclick=()=>{panel.hidden=true};add.onclick=capture;
+ q('#print-logo').onchange=async event=>{const file=event.target.files?.[0];if(!file){if(logoURL)URL.revokeObjectURL(logoURL);logoURL=null;return}if(!['image/png','image/jpeg','image/webp'].includes(file.type)||file.size>5*1024**2){if(logoURL)URL.revokeObjectURL(logoURL);logoURL=null;message.textContent='请选择不超过 5 MB 的 PNG、JPEG 或 WebP 图片';event.target.value='';return}const url=URL.createObjectURL(file);try{const image=new Image();image.src=url;await decoded(image);if(logoURL)URL.revokeObjectURL(logoURL);logoURL=url;message.textContent=''}catch{URL.revokeObjectURL(url);if(logoURL)URL.revokeObjectURL(logoURL);logoURL=null;event.target.value='';message.textContent='标识图片无法读取'}};
+ output.onclick=async()=>{if(!items.length)return;output.disabled=true;message.textContent='';try{const images=build();await Promise.all(images.map(decoded));sheet.hidden=false;document.body.classList.add('print-ready');window.print()}catch(error){sheet.hidden=true;document.body.classList.remove('print-ready');message.textContent='无法准备打印页面，请重试'}finally{output.disabled=!items.length}};
+ window.addEventListener('afterprint',()=>{sheet.hidden=true;document.body.classList.remove('print-ready')});window.addEventListener('pagehide',()=>{for(const item of items)URL.revokeObjectURL(item.url);if(logoURL)URL.revokeObjectURL(logoURL)});
+ sync();return{capture,get count(){return items.length}};
+};

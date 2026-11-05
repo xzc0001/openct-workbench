@@ -23,6 +23,7 @@ class PreviewLoadingTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.job=Path(self.temp.name)/'jobs'/('b'*32);self.out=self.job/'output';self.out.mkdir(parents=True)
         self.accounts,self.auth_headers=fixture(Path(self.temp.name))
+        (self.job/'status.json').write_text(json.dumps({'id':self.job.name,'kind':'folder','state':'completed','created_at':1,'owner_id':self.accounts.users()[0]['id']}),encoding='utf-8')
         z,y,x=np.indices((69,75,130));self.data=((x*17+y*23+z*31)%5000-1024).astype('<i2')
         a=.31;direction=np.array([[np.cos(a),-np.sin(a),0],[np.sin(a),np.cos(a),0],[0,0,1]])
         matrix=direction@np.diag([.71,.83,1.21]);origin=np.array([-31.,41.,-80.]);size=list(self.data.shape[::-1]);corners=np.array([origin+matrix@np.array([x,y,z]) for x in [0,size[0]-1] for y in [0,size[1]-1] for z in [0,size[2]-1]])
@@ -74,6 +75,35 @@ class PreviewLoadingTests(unittest.TestCase):
         with self.assertRaises(ValueError):self.preview.volume('',100)
         values,start,size=self.preview.volume('',128*1024**2)
         np.testing.assert_array_equal(values,self.data);self.assertEqual(start.tolist(),[0,0,0]);self.assertEqual(size.tolist(),self.ct['size'])
+    def test_sampled_volume_keeps_voxel_values_and_bounds_budget(self):
+        values,start,size=self.preview.volume('',128*1024**2,[2,3,4])
+        np.testing.assert_array_equal(values,self.data[::4,::3,::2])
+        self.assertEqual(start.tolist(),[0,0,0]);self.assertEqual(size.tolist(),list(values.shape[::-1]))
+        with self.assertRaises(ValueError):self.preview.volume('',100,[2,3,4])
+        for stride in ([0,1,1],[1,1,33],[1,1],[1.5,1,1]):
+            with self.assertRaises(ValueError):self.preview.volume('',128*1024**2,stride)
+    @unittest.skipUnless(shutil.which('node'),'Node runtime unavailable on this host')
+    def test_offline_sampled_ct_preserves_oblique_geometry_and_values(self):
+        assets={key:base64.b64encode(self.preview.compressed(key)).decode() for key in self.preview.index['assets']}
+        request={'ct':self.preview.ct,'rois':self.rois,'assets':assets,'plane':self.request(),'stride':[2,3,4]}
+        result=subprocess.run(['node',str(Path(__file__).parent/'qa/test_viewer_source.cjs')],input=json.dumps(request),text=True,capture_output=True,check=True)
+        reply=json.loads(result.stdout);expected=np.ascontiguousarray(self.data[::4,::3,::2])
+        self.assertEqual(reply['volume_sha256'],hashlib.sha256(expected.tobytes()).hexdigest())
+        self.assertEqual(reply['volume_size'],list(expected.shape[::-1]));self.assertEqual(reply['volume_origin'],self.ct['origin'])
+        np.testing.assert_allclose(reply['volume_matrix'],np.array(self.ct['matrix'])@np.diag([2,3,4]))
+        np.testing.assert_allclose(reply['volume_spacing'],np.array(self.ct['spacing'])*[2,3,4])
+    @unittest.skipUnless(shutil.which('node'),'Node runtime unavailable on this host')
+    def test_sampled_roi_matches_native_crop_across_brick_boundaries(self):
+        roi={'group':'test','origin_lps':[-30.,42.,-75.],'size':[60,50,40],'spacing':[.8,.9,1.2]}
+        self.preview.index['rois']={'rois':[roi]}
+        values,start,size=self.preview.volume('test',128*1024**2,[2,3,4])
+        assets={key:base64.b64encode(self.preview.compressed(key)).decode() for key in self.preview.index['assets']}
+        request={'ct':self.preview.ct,'rois':{'rois':[roi]},'assets':assets,'plane':self.request(),'scope':'test','stride':[2,3,4]}
+        result=subprocess.run(['node',str(Path(__file__).parent/'qa/test_viewer_source.cjs')],input=json.dumps(request),text=True,capture_output=True,check=True)
+        reply=json.loads(result.stdout)
+        self.assertEqual(reply['volume_sha256'],hashlib.sha256(values.tobytes()).hexdigest())
+        self.assertEqual(reply['volume_start'],start.tolist());self.assertEqual(reply['volume_size'],size.tolist())
+        np.testing.assert_allclose(reply['volume_origin'],np.array(self.ct['origin'])+np.array(self.ct['matrix'])@start)
     @unittest.skipUnless(shutil.which('node'),'Node runtime unavailable on this host')
     def test_online_native_planes_volume_and_mesh_without_decompression_stream(self):
         import server
@@ -91,13 +121,37 @@ class PreviewLoadingTests(unittest.TestCase):
                 self.assertEqual(reply['model_sha256'],hashlib.sha256(self.positions.tobytes()).hexdigest())
                 self.assertEqual(reply['failed_requests'],2)
                 self.assertLess(reply['cached_bytes'],64*1024**2)
+                sampled={**request,'stride':[2,3,4],'failFirstRequests':0}
+                sampled_result=subprocess.run(['node',str(script)],input=json.dumps(sampled),text=True,capture_output=True,check=True,timeout=30)
+                sampled_reply=json.loads(sampled_result.stdout)
+                expected=np.ascontiguousarray(self.data[::4,::3,::2])
+                self.assertEqual(sampled_reply['volume_sha256'],hashlib.sha256(expected.tobytes()).hexdigest())
+                self.assertEqual(sampled_reply['volume_size'],list(expected.shape[::-1]))
+                np.testing.assert_allclose(sampled_reply['volume_matrix'],np.array(self.ct['matrix'])@np.diag([2,3,4]))
             finally:http.shutdown();http.server_close();thread.join()
     def test_asset_refresh_preserves_native_hu_and_reference_geometry(self):
         before=self.preview.ct['raw_sha256'];old_model=self.preview.index['scene']['models'][0]
-        receipt=refresh_indexed(self.out/'preview.html');current=Preview(self.out/'online'/receipt['online_generation'])
+        receipt=refresh_indexed(self.out/'preview.html',keep_previous=True);current=Preview(self.out/'online'/receipt['online_generation'])
         self.assertEqual(current.ct['raw_sha256'],before)
         self.assertEqual(current.index['scene']['models'][0]['positions'],old_model['positions'])
+        self.assertTrue((self.preview.directory/'index.json').is_file())
         np.testing.assert_array_equal(current.plane(self.request()),self.data[33])
+    def test_refresh_refuses_to_replace_preview_when_study_becomes_active(self):
+        import preview_package
+        status=self.job/'status.json';status.write_text(json.dumps({'id':self.job.name,'state':'completed'}))
+        before=(self.out/'preview.html').read_bytes();pointer=(self.out/'online/current.json').read_bytes()
+        write=preview_package.write_preview
+        def interrupt(*args,**kwargs):
+            guard=kwargs['before_publish']
+            def changed():
+                status.write_text(json.dumps({'id':self.job.name,'state':'running'}))
+                guard()
+            kwargs['before_publish']=changed
+            return write(*args,**kwargs)
+        with patch('preview_package.write_preview',side_effect=interrupt):
+            with self.assertRaisesRegex(ValueError,'became active'):refresh_indexed(self.out/'preview.html',require_completed=True)
+        self.assertEqual((self.out/'preview.html').read_bytes(),before)
+        self.assertEqual((self.out/'online/current.json').read_bytes(),pointer)
     def test_http_shell_download_plane_and_previous_generation(self):
         import server
         from study_updates import begin,restore

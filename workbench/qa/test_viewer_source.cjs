@@ -9,9 +9,9 @@ const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),cryp
  if(data.requestHeaders){const actualFetch=global.fetch;global.fetch=(url,options)=>actualFetch(url,{...options,headers:{...options?.headers,...data.requestHeaders}})}
  if(data.failFirstRequests){const actualFetch=global.fetch;global.fetch=(url,options)=>{if(failedRequests<data.failFirstRequests){failedRequests++;return Promise.reject(new TypeError('Failed to fetch'))}return actualFetch(url,options)}}
  vm.runInThisContext(fs.readFileSync(path.join(__dirname,'../assets/viewer-source.js'),'utf8'));
- const source=await createViewerSource(data.ct,data.rois),plane=await source.plane(data.plane),volume=await source.region('',128*1024**2);
+ const source=await createViewerSource(data.ct,data.rois),plane=await source.plane(data.plane),volume=await source.region(data.scope||'',data.budget||128*1024**2,data.stride||[1,1,1]);
  const hash=a=>crypto.createHash('sha256').update(new Uint8Array(a.buffer,a.byteOffset,a.byteLength)).digest('hex');
- const result={plane_sha256:hash(plane),volume_sha256:hash(volume.data),cached_bytes:source.cachedBytes,failed_requests:failedRequests};
+ const result={plane_sha256:hash(plane),volume_sha256:hash(volume.data),volume_size:volume.size,volume_start:volume.start,volume_origin:volume.origin,volume_matrix:volume.matrix,volume_spacing:volume.spacing,cached_bytes:source.cachedBytes,failed_requests:failedRequests};
  if(data.model)result.model_sha256=hash(new Uint8Array(await source.load(data.model.positions)));
  process.stdout.write(JSON.stringify(result));
 })().catch(error=>{console.error(error);process.exit(1)});

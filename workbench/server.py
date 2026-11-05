@@ -13,13 +13,16 @@ import signal
 import socketserver
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
 import gzip
 import hashlib
 import hmac
-from auth import Accounts, Forbidden, can_manage, authorize_cleanup, COOKIE
+import zipfile
+import zlib
+from auth import Accounts, Forbidden, can_manage, authorize_cleanup, COOKIE, GUEST_COOKIE
 from structures import resolve, capabilities, reconstruction_presets, validate_candidate_parameters
 
 ROOT = Path(__file__).resolve().parent
@@ -37,7 +40,12 @@ RESOURCES = None
 MAX_UPLOAD = 4 * 1024**3
 ACTIVE = {"uploading", "queued_scan", "scanning", "queued", "running"}
 CLEANUP_PLANS = {}
+TRANSFER_IMPORT = threading.BoundedSemaphore(1)
+TRANSFER_SEND = {}
 AUTH = None
+CLUSTER = None
+LOCAL_COMPUTE_LOCK = threading.Lock()
+SERVER_STOPPING = threading.Event()
 
 
 def enough_space():
@@ -116,6 +124,10 @@ def public(job):
             record = read(review)
             result["candidate_review"] = {"parameters":record.get("parameters",{}),"count":len(record["candidates"]),"candidates":[{**{k:v for k,v in entry.items() if k not in {"mask_file","thumbnail_file"}}, "thumbnail":f"/results/{job.name}/candidate/{entry['id']}.png"} for entry in record["candidates"]]}
         result["candidate_ids"] = status.get("candidate_ids",[])
+    if CLUSTER and status.get('cluster_managed'):
+        snapshot=CLUSTER.snapshot(job)
+        if snapshot:
+            result['cluster']={'state':snapshot['state'],'completed':sum(s['status']=='completed' for s in snapshot['stages']),'total':len(snapshot['stages']),'nodes':len({l['node_id'] for l in snapshot['leases'] if l['state']=='active'})}
     return result
 
 
@@ -144,6 +156,69 @@ def queue_update(job, status, command, **values):
     QUEUE.put((job, command))
 
 
+def worker_tmpdir(scratch):
+    """Keep worker scratch on the data disk while giving AF_UNIX a short path."""
+    if os.name == 'nt':
+        return str(scratch), None
+    temporary = tempfile.TemporaryDirectory(prefix='ct-', dir='/tmp')
+    try:
+        alias = Path(temporary.name) / 't'
+        alias.symlink_to(scratch.resolve(), target_is_directory=True)
+        return str(alias), temporary
+    except Exception:
+        temporary.cleanup()
+        raise
+
+
+def execute_worker(job,command,extra_env=None):
+    # The existing cgroup and resource receipt describe one local compute tree.
+    # Remote nodes run concurrently, but preprocess/publication must share this
+    # single local admission gate instead of overwriting active-worker.json.
+    while not SERVER_STOPPING.is_set():
+        if LOCAL_COMPUTE_LOCK.acquire(timeout=.2):
+            try:
+                while not SERVER_STOPPING.is_set():
+                    if TRANSFER_IMPORT.acquire(timeout=.2):
+                        try:return _execute_worker(job,command,extra_env)
+                        finally:TRANSFER_IMPORT.release()
+                return 1,'服务正在停止'
+            finally:LOCAL_COMPUTE_LOCK.release()
+    return 1,'服务正在停止'
+
+
+def _execute_worker(job,command,extra_env=None):
+    """All local preprocess/publication stays in the existing bounded tree."""
+    with LOCK:
+        if SERVER_STOPPING.is_set():return 1,'服务正在停止'
+        if read(job/'status.json')['state'] not in {'running','scanning'}:return 1,'任务已取消'
+        scratch=job/'cache';scratch.mkdir(parents=True,exist_ok=True)
+        temp_path,temporary=worker_tmpdir(scratch)
+        env=os.environ.copy()
+        env.update(PYTHONPATH=str(ROOT/'offline_guard'),TMPDIR=temp_path,PYTHONDONTWRITEBYTECODE='1',PYTHONUNBUFFERED='1',PYTHONIOENCODING='utf-8',ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS=str(CONFIG['threads']),OMP_NUM_THREADS=str(CONFIG['threads']),MKL_NUM_THREADS=str(CONFIG['threads']),OPENBLAS_NUM_THREADS=str(CONFIG['threads']),NUMEXPR_NUM_THREADS=str(CONFIG['threads']),MALLOC_ARENA_MAX='2',nnUNet_compile='false',HF_HUB_OFFLINE='1')
+        env.update(extra_env or {})
+        log=(job/'worker.log').open('ab')
+        invocation=RESOURCES.command(PYTHON,ROOT/'worker.py',command,job) if RESOURCES else [str(PYTHON),str(ROOT/'worker.py'),command,str(job)]
+        process=None
+        try:
+            process=subprocess.Popen(invocation,cwd=ROOT,env=env,stdin=subprocess.DEVNULL,stdout=log,stderr=log,creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0,start_new_session=os.name!='nt')
+            if RESOURCES:RESOURCES.started(process,job)
+        except Exception:
+            if process is not None:stop_process(process)
+            log.close()
+            if temporary is not None:temporary.cleanup()
+            raise
+        PROCESSES[job.name]=process
+    try:
+        code=process.wait()
+        return code,RESOURCES.finished(process) if RESOURCES else None
+    finally:
+        log.close()
+        if temporary is not None:temporary.cleanup()
+        with LOCK:
+            if PROCESSES.get(job.name) is process:PROCESSES.pop(job.name,None)
+            ACTIVITY.pop(job.name,None)
+
+
 def work():
     while True:
         job, command = QUEUE.get()
@@ -154,34 +229,30 @@ def work():
                 if status["state"] != expected:
                     continue
                 update(job, state="scanning" if command == "scan" else "running", started_at=time.time())
-                scratch = job/'cache'
-                scratch.mkdir(parents=True, exist_ok=True)
-                env = os.environ.copy()
-                env.update(PYTHONPATH=str(ROOT / "offline_guard"), TMPDIR=str(scratch), PYTHONDONTWRITEBYTECODE="1", PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8", ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS=str(CONFIG["threads"]), OMP_NUM_THREADS=str(CONFIG["threads"]), MKL_NUM_THREADS=str(CONFIG["threads"]), OPENBLAS_NUM_THREADS=str(CONFIG['threads']), NUMEXPR_NUM_THREADS=str(CONFIG['threads']), MALLOC_ARENA_MAX='2', nnUNet_compile="false", HF_HUB_OFFLINE="1")
-                log = (job / "worker.log").open("ab")
-                invocation = RESOURCES.command(PYTHON, ROOT/'worker.py', command, job) if RESOURCES else [str(PYTHON), str(ROOT/'worker.py'), command, str(job)]
-                process = subprocess.Popen(invocation, cwd=ROOT, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log, creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,start_new_session=os.name!='nt')
-                try:
-                    if RESOURCES: RESOURCES.started(process, job)
-                except Exception:
-                    stop_process(process)
-                    log.close()
-                    raise
-                PROCESSES[job.name] = process
-            code = process.wait()
-            log.close()
-            resource_error = RESOURCES.finished(process) if RESOURCES else None
+            remote=bool(CLUSTER and CLUSTER.settings['enabled'] and command=='run' and not status.get('cluster_force_local'))
+            if status.get('cluster_force_local'):
+                with LOCK:update(job,cluster_force_local=False)
+            if remote and CLUSTER.settings['local_fallback']:
+                nodes=CLUSTER.coordinator.list_nodes()
+                remote=any(n.get('state',n.get('status'))=='ready' and (n.get('last_seen') or 0)>time.time()-30 for n in nodes)
+            code,resource_error=execute_worker(job,'cluster_prepare' if remote else command)
+            if remote and code==0 and CLUSTER.settings['local_fallback']:
+                with LOCK: current_status=read(job/'status.json')
+                if current_status['state']=='running' and not CLUSTER.can_schedule(job,current_status):
+                    remote=False
+                    code,resource_error=execute_worker(job,command)
             with LOCK:
-                PROCESSES.pop(job.name, None)
-                ACTIVITY.pop(job.name, None)
                 if read(job / "status.json")["state"] == "cancelled":
                     finish_update(job, False, '本次更新已取消，保留上一版结果')
+                    continue
+                if remote and code==0:
+                    CLUSTER.submit(job)
                     continue
                 if code == 0 and (command == "scan" or (job / "output" / "preview.html").is_file()):
                     if not finish_update(job, True):update(job, state="ready" if command == "scan" else "completed", error=None, finished_at=time.time())
                 else:
                     progress = read(job / "progress.json") if (job / "progress.json").exists() else {}
-                    error=resource_error or progress.get("error", "处理进程退出，请检查 worker.log")
+                    error=resource_error or progress.get("error") or "处理进程退出，请检查 worker.log"
                     if not finish_update(job, False, '更新失败，已恢复上一版：'+error):update(job, state="failed", error=error)
         except Exception:
             if not finish_update(job, False, '更新中断，已恢复上一版'):update(job, state="failed", error="启动或执行处理失败，请检查运行环境")
@@ -259,13 +330,48 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_file(ROOT/'web'/name,'text/html; charset=utf-8' if name.endswith('.html') else 'text/javascript; charset=utf-8' if name.endswith('.js') else 'text/css; charset=utf-8')
         if url.path=='/api/healthz':
             return self.send_json({'ok':True,'resource_isolation':RESOURCES is not None})
-        if not self.require_login(url.path.endswith(('.html','/'))):return
+        if url.path=='/results/guest':
+            return self.send_file(ROOT/'web/guest.html','text/html; charset=utf-8')
+        guest=AUTH.guest_from_cookie(self.headers.get('Cookie')) if AUTH else None
+        if url.path=='/api/guest/studies':
+            if not guest:return self.send_json({'error':'链接无效或已过期'},401)
+            rows=[]
+            for sid in guest['study_ids']:
+                job=JOBS/sid
+                if (job/'output/preview.html').is_file() and (job/'status.json').is_file():
+                    status=read(job/'status.json');rows.append({'id':sid,'name':status.get('note_name') or 'CT 检查 '+sid[:8],'preview':'/results/'+sid+'/preview.html'})
+            return self.send_json({'studies':rows,'expires':guest['expires']})
+        match_transfer=re.fullmatch(r'/api/jobs/([a-f0-9]{32})/transfer',url.path)
+        if match_transfer:
+            if not self.require_login():return
+            job=JOBS/match_transfer[1]
+            if not (job/'status.json').is_file() or not can_manage(self.user,read(job/'status.json')):return self.send_json({'error':'无权查看此任务'},403)
+            return self.send_json(TRANSFER_SEND.get((self.user['id'],job.name),{'stage':'idle','percent':0}))
+        if url.path=='/api/guest/links':
+            if not self.require_login():return
+            if self.user['role']!='admin':return self.send_json({'error':'仅管理员可管理游客链接'},403)
+            return self.send_json({'links':AUTH.guest_links(self.user)})
+        # Guests may only GET a selected study's preview and its indexed assets.
+        allowed=re.fullmatch(r'/results/([a-f0-9]{32})/(preview\.html|view/[a-f0-9]{32}/(?:asset/[a-f0-9]{64}\.gz|plane|volume))',url.path)
+        guest_allowed=guest and allowed and allowed[1] in guest['study_ids'] and parse_qs(url.query).get('download')!=['1']
+        if guest_allowed:self.user={'role':'guest'}
+        elif not self.require_login(url.path.endswith(('.html','/'))):return
         if url.path=='/api/auth/check':return self.headers_out(204,'text/plain',0)
+        if url.path=='/api/auth/admin-check':return self.headers_out(204 if self.user['role']=='admin' else 403,'text/plain',0)
+        if url.path=='/api/cluster/v1/admin/nodes':
+            if self.user['role']!='admin':return self.send_json({'error':'仅管理员可管理节点'},403)
+            return self.send_json(CLUSTER.admin_get() if CLUSTER else {'settings':{'enabled':False,'local_fallback':False},'nodes':[]})
         if url.path=='/api/auth/session':
             return self.send_json({k:self.user[k] for k in ('id','username','role','csrf')})
+        match_viewers=re.fullmatch(r'/api/jobs/([a-f0-9]{32})/viewers',url.path)
+        if match_viewers:
+            path=JOBS/match_viewers[1]/'status.json'
+            if not path.is_file() or not can_manage(self.user,read(path)):return self.send_json({'error':'无权管理此检查的浏览权限'},403)
+            status=read(path)
+            return self.send_json({'viewers':AUTH.viewer_options(match_viewers[1]),'owners':AUTH.owner_options() if self.user['role']=='admin' else [],'owner_id':status.get('owner_id') if self.user['role']=='admin' else None})
         if url.path=='/api/auth/users':
             return self.send_json({'users':AUTH.users()}) if self.user['role']=='admin' else self.send_json({'error':'仅管理员可管理账号'},403)
-        routes = {"/": ("web/index.html", "text/html; charset=utf-8"), "/workbench/": ("web/index.html", "text/html; charset=utf-8"), "/app.js": ("web/app.js", "text/javascript; charset=utf-8"), "/storage.js": ("web/storage.js", "text/javascript; charset=utf-8"), "/account.js": ("web/account.js", "text/javascript; charset=utf-8"), "/app.css": ("web/app.css", "text/css; charset=utf-8")}
+        routes = {"/": ("web/index.html", "text/html; charset=utf-8"), "/workbench/": ("web/index.html", "text/html; charset=utf-8"), "/app.js": ("web/app.js", "text/javascript; charset=utf-8"), "/storage.js": ("web/storage.js", "text/javascript; charset=utf-8"), "/account.js": ("web/account.js", "text/javascript; charset=utf-8"), "/cluster.js": ("web/cluster.js", "text/javascript; charset=utf-8"), "/app.css": ("web/app.css", "text/css; charset=utf-8")}
         try:
             if url.path == "/favicon.ico":
                 return self.headers_out(204, "image/x-icon", 0)
@@ -274,23 +380,45 @@ class Handler(BaseHTTPRequestHandler):
             if url.path in routes:
                 file, kind = routes[url.path]
                 return self.send_file(ROOT / file, kind)
+            export=re.fullmatch(r'/api/jobs/([a-f0-9]{32})/export-preview',url.path)
+            if export:
+                job=JOBS/export[1];status=read(job/'status.json')
+                if not can_manage(self.user,status):return self.send_json({'error':'无权导出此检查'},403)
+                if status.get('state')!='completed' or not (job/'output/preview.html').is_file():raise ValueError('该检查暂无可导出的预览')
+                from preview_transfer import export_preview
+                cache=ROOT/'cache';cache.mkdir(exist_ok=True)
+                if shutil.disk_usage(cache).free<(job/'output/preview.html').stat().st_size+2*1024**3:raise ValueError('可用空间不足，无法导出')
+                with tempfile.TemporaryDirectory(prefix='preview-export-',dir=cache) as directory:
+                    package=Path(directory)/'preview.ctpreview.zip'
+                    export_preview(job/'output',package,{'source_id':status.get('transfer_source_id',job.name),'note_name':status.get('note_name','')})
+                    return self.send_file(package,'application/zip',download='CT-preview-'+job.name[:8]+'.ctpreview.zip')
             if url.path == "/api/environment":
                 weights = (ROOT / CONFIG["weights"]).resolve()
                 complete = lambda i:any(p.is_dir() and any(p.rglob('checkpoint_final.pth')) for p in weights.glob(f'Dataset{i}_*'))
-                return self.send_json({"python_available": PYTHON.is_file(), "model_folders": {str(i): complete(i) for i in (297, 298, 291, 292, 293, 294, 295, 117, 913)}, "capabilities": capabilities(), "presets": reconstruction_presets(), "offline": True, "study_centered":True, "threads": CONFIG["threads"], "free_disk_gb": round(shutil.disk_usage(ROOT).free / 1024**3, 1), "deployment_mode":CONFIG.get('deployment_mode','local'), "portal_url":CONFIG.get('portal_url')})
+                return self.send_json({"python_available": PYTHON.is_file(), "model_folders": {str(i): complete(i) for i in (297, 298, 291, 292, 293, 294, 295, 117, 913)}, "capabilities": capabilities(), "presets": reconstruction_presets(), "offline": True, "study_centered":True, "transfer_available":bool(CONFIG.get('transfer_target')), "transfer_url":CONFIG.get('transfer_public_url'), "threads": CONFIG["threads"], "free_disk_gb": round(shutil.disk_usage(ROOT).free / 1024**3, 1), "deployment_mode":CONFIG.get('deployment_mode','local'), "portal_url":CONFIG.get('portal_url')})
             if url.path == '/api/storage':
+                if self.user['role']=='viewer':return self.send_json({'error':'无权管理存储'},403)
                 from storage import inventory
                 with LOCK:
                     data=inventory(ROOT, (ROOT/CONFIG['weights']).resolve())
+                    data['jobs']=[row for row in data['jobs'] if can_manage(self.user,read(JOBS/row['id']/'status.json'))]
+                    remote=CLUSTER.active() if CLUSTER else set()
                     for row in data['jobs']:
-                        row['can_clean']=row['can_clean'] and can_manage(self.user,read(JOBS/row['id']/'status.json'))
+                        row['can_clean']=row['can_clean'] and row['id'] not in remote and can_manage(self.user,read(JOBS/row['id']/'status.json'))
                     data['can_clean_cache']=self.user['role']=='admin'
                     return self.send_json(data)
+            if url.path == '/api/activity':
+                return self.send_json({'busy':any(read(p).get('state') in {'queued_scan','scanning','queued','running'} for p in JOBS.glob('*/status.json'))})
             if url.path == "/api/jobs":
                 with LOCK:
-                    jobs = [public(p.parent) for p in JOBS.glob("*/status.json")]
+                    jobs = [public(p.parent) for p in JOBS.glob("*/status.json") if AUTH.may_view(self.user,read(p))]
                     for row in jobs:row['can_manage']=can_manage(self.user,read(JOBS/row['id']/'status.json'))
                 return self.send_json({"jobs": sorted(jobs, key=lambda job: job["created_at"], reverse=True)})
+            result_job=re.match(r'^/results/([a-f0-9]{32})/',url.path)
+            if result_job and self.user['role']!='guest':
+                path=JOBS/result_job[1]/'status.json'
+                if not path.is_file() or not AUTH.may_view(self.user,read(path)):return self.send_json({'error':'无权浏览此检查'},403)
+                if self.user['role']=='viewer' and parse_qs(url.query).get('download')==['1']:return self.send_json({'error':'无权导出此检查'},403)
             live=re.fullmatch(r'/results/([a-f0-9]{32})/live/([a-f0-9]{32})/(preview\.html|snapshot|asset/([a-f0-9]{64})\.gz)',url.path)
             if live:
                 job=JOBS/live[1]; folder=job/'output/live'/live[2]
@@ -309,7 +437,7 @@ class Handler(BaseHTTPRequestHandler):
                     if hashlib.sha256(data).hexdigest()!=live[4]:raise ValueError('Live asset checksum failed')
                     self.send_response(200);self.send_header('Content-Type','application/octet-stream');self.send_header('Content-Length',str(len(data)))
                     if parse_qs(url.query).get('decoded')==['1']:self.send_header('Content-Encoding','gzip')
-                    self.send_header('Cache-Control','private, max-age=86400, immutable');self.send_header('X-Content-Type-Options','nosniff');self.end_headers();self.wfile.write(data)
+                    self.send_header('Cache-Control','private, no-store');self.send_header('X-Content-Type-Options','nosniff');self.end_headers();self.wfile.write(data)
                     return
                 generation=read(folder/'online/current.json')['generation']
                 if not re.fullmatch('[a-f0-9]{32}',generation):raise ValueError('Invalid live version')
@@ -338,10 +466,11 @@ class Handler(BaseHTTPRequestHandler):
                         data=gzip.compress(memoryview(preview.plane(request)).cast('B'),compresslevel=1,mtime=0)
                     else:
                         query=parse_qs(url.query)
-                        values,start,size=preview.volume(query.get('scope',[''])[0],query.get('budget',['0'])[0])
+                        stride=[int(x) for x in query.get('stride',['1,1,1'])[0].split(',')]
+                        values,start,size=preview.volume(query.get('scope',[''])[0],query.get('budget',['0'])[0],stride)
                         data=gzip.compress(memoryview(values).cast('B'),compresslevel=1,mtime=0)
                         del values
-                        headers={'X-CT-Start':json.dumps(start.tolist()),'X-CT-Size':json.dumps(size.tolist())}
+                        headers={'X-CT-Start':json.dumps(start.tolist()),'X-CT-Size':json.dumps(size.tolist()),'X-CT-Stride':json.dumps(stride)}
                 self.send_response(200)
                 for key,value in headers.items():self.send_header(key,value)
                 self.send_header('Content-Type','application/octet-stream')
@@ -412,26 +541,108 @@ class Handler(BaseHTTPRequestHandler):
             except (OSError,ValueError,KeyError):
                 self.close_connection=True
                 return self.send_json({'error':'登录参数无效'},400)
+        if url.path=='/api/guest/enter':
+            try:
+                request=self.body_json();token=request.get('token') if isinstance(request,dict) else None
+                guest=AUTH.guest_link(token) if AUTH else None
+                if not guest:return self.send_json({'error':'链接无效或已过期'},401)
+                secure='; Secure' if self.headers.get('X-Forwarded-Proto')=='https' else ''
+                self.headers_out(200,'application/json',2,{'Set-Cookie':f'{GUEST_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max(0,int(guest["expires"]-time.time()))}'+secure,'Cache-Control':'no-store'})
+                self.wfile.write(b'{}');return
+            except (OSError,ValueError,KeyError):return self.send_json({'error':'链接无效'},400)
         if not self.require_login():return
         if not self.csrf_ok():
             self.close_connection=True
             return self.send_json({'error':'登录校验已失效，请刷新页面'},403)
         job = None
         try:
-            binary=url.path=='/api/uploads/zip' or re.fullmatch(r'/api/jobs/[a-f0-9]{32}/file',url.path)
+            binary=url.path in {'/api/uploads/zip','/api/import-preview'} or re.fullmatch(r'/api/jobs/[a-f0-9]{32}/file',url.path)
             content_type=self.headers.get('Content-Type','').split(';')[0]
             if binary and content_type!='application/octet-stream':
                 raise ValueError('上传接口仅接收二进制文件内容')
             request_data = self.body_json() if self.headers.get("Content-Type", "").split(";")[0] == "application/json" else None
+            if url.path=='/api/import-preview':
+                if self.user['role'] not in {'admin','user'}:raise Forbidden('当前账号无上传权限')
+                size=int(self.headers.get('Content-Length','0'))
+                if not 0<size<=MAX_UPLOAD:raise ValueError('预览包大小无效')
+                if shutil.disk_usage(JOBS).free<size*4+2*1024**3:raise ValueError('服务器可用空间不足')
+                if not TRANSFER_IMPORT.acquire(blocking=False):raise ValueError('服务器正在接收其他预览，请稍后重试')
+                try:
+                    from preview_transfer import import_preview
+                    with tempfile.TemporaryDirectory(prefix='.preview-import-',dir=JOBS) as folder:
+                        package=Path(folder)/'upload.zip';remaining=size;self.connection.settimeout(180)
+                        with package.open('xb') as dest:
+                            while remaining:
+                                block=self.rfile.read(min(1024**2,remaining))
+                                if not block:raise ValueError('预览上传中断')
+                                dest.write(block);remaining-=len(block)
+                        try:return self.send_json(import_preview(sys.modules[__name__],package,self.user,folder))
+                        except (zipfile.BadZipFile,EOFError,KeyError,TypeError,OverflowError,zlib.error,UnicodeDecodeError) as error:raise ValueError('预览包无效或已损坏') from error
+                finally:TRANSFER_IMPORT.release()
+            match_send=re.fullmatch(r'/api/jobs/([a-f0-9]{32})/send-preview',url.path)
+            if match_send:
+                if not CONFIG.get('transfer_target'):raise ValueError('当前工作台没有配置上传目标')
+                if not isinstance(request_data,dict):raise ValueError('上传参数无效')
+                job=JOBS/match_send[1]
+                if not (job/'status.json').is_file() or not can_manage(self.user,read(job/'status.json')):raise Forbidden('无权上传此检查')
+                if read(job/'status.json')['state']!='completed':raise ValueError('请先完成重建')
+                username,password=request_data.get('username'),request_data.get('password')
+                if not isinstance(username,str) or not isinstance(password,str) or len(username)>128 or len(password)>128:raise ValueError('服务器账号无效')
+                key=(self.user['id'],job.name)
+                with LOCK:
+                    if TRANSFER_SEND.get(key,{}).get('stage') in {'packaging','uploading','importing'}:raise ValueError('该检查正在上传')
+                    TRANSFER_SEND[key]={'stage':'packaging','percent':0}
+                def run():
+                    from transfer_client import send_preview
+                    def report(**values):TRANSFER_SEND[key]={**TRANSFER_SEND[key],**values}
+                    try:
+                        (job/'cache').mkdir(exist_ok=True)
+                        target=CONFIG['transfer_target'];result=send_preview(job,(target['host'],target['port']),username,password,report)
+                        report(stage='completed',percent=100,server_id=result['id'])
+                    except Exception as error:report(stage='failed',error=str(error)[:200])
+                threading.Thread(target=run,daemon=True).start()
+                return self.send_json({'started':True})
+            if url.path=='/api/guest/links':
+                if self.user['role']!='admin':raise Forbidden('仅管理员可管理游客链接')
+                if not isinstance(request_data,dict):raise ValueError('链接参数无效')
+                ids=request_data.get('study_ids')
+                if not isinstance(ids,list) or any(not isinstance(sid,str) or not re.fullmatch(r'[a-f0-9]{32}',sid) or not (JOBS/sid/'output/preview.html').is_file() for sid in ids):raise ValueError('请选择已有预览的检查')
+                return self.send_json(AUTH.create_guest_link(self.user,ids,request_data.get('days',7)),201)
+            if url.path=='/api/guest/revoke':
+                if not isinstance(request_data,dict):raise ValueError('链接参数无效')
+                AUTH.revoke_guest_link(self.user,request_data.get('id'));return self.send_json({'revoked':True})
+            if url.path.startswith('/api/cluster/v1/admin/'):
+                if self.user['role']!='admin':raise Forbidden('仅管理员可管理节点')
+                if not CLUSTER:raise ValueError('节点调度未配置')
+                if not isinstance(request_data,dict):raise ValueError('节点管理参数无效')
+                return self.send_json(CLUSTER.admin_post(url.path.rsplit('/',1)[-1],request_data))
+            match_owner=re.fullmatch(r'/api/jobs/([a-f0-9]{32})/owner',url.path)
+            if match_owner:
+                if self.user['role']!='admin':raise Forbidden('仅管理员可调整归属')
+                path=JOBS/match_owner[1]/'status.json'
+                if not path.is_file() or not isinstance(request_data,dict):raise ValueError('检查或账号无效')
+                owner=next((u for u in AUTH.owner_options() if u['id']==request_data.get('user_id')),None)
+                if not owner:raise ValueError('请选择启用的上传用户或管理员')
+                with LOCK:
+                    status=read(path)
+                    if status.get('state') in ACTIVE:raise ValueError('请在检查处理结束后调整归属')
+                    update(path.parent,owner_id=owner['id'],owner_name=owner['username'])
+                return self.send_json({'saved':True})
+            match_viewers=re.fullmatch(r'/api/jobs/([a-f0-9]{32})/viewers',url.path)
+            if match_viewers:
+                path=JOBS/match_viewers[1]/'status.json'
+                if not path.is_file() or not can_manage(self.user,read(path)):raise Forbidden('无权管理此检查的浏览权限')
+                if not isinstance(request_data,dict):raise ValueError('浏览权限参数无效')
+                AUTH.set_viewers(match_viewers[1],request_data.get('user_ids'))
+                return self.send_json({'saved':True})
             if url.path=='/api/auth/logout':
                 AUTH.logout(self.user)
                 self.headers_out(200,'application/json',2,{'Set-Cookie':f'{COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0'})
                 self.wfile.write(b'{}');return
             if url.path=='/api/auth/password':
+                if self.user['role']!='admin':raise Forbidden('仅管理员可修改密码')
                 if not isinstance(request_data,dict):raise ValueError('密码参数无效')
-                # Administrators must also prove their old password when changing their own.
-                actor={**self.user,'role':'user'}
-                AUTH.change(self.user['id'],request_data,actor)
+                AUTH.change(self.user['id'],request_data,self.user)
                 return self.send_json({'updated':True})
             if url.path=='/api/auth/users':
                 if self.user['role']!='admin':raise Forbidden('仅管理员可管理账号')
@@ -452,7 +663,7 @@ class Handler(BaseHTTPRequestHandler):
                         authorize_cleanup(self.user,request_data,states(ROOT))
                         if len(CLEANUP_PLANS)>=128:
                             raise ValueError('待确认清理方案过多，请稍后重试')
-                        preview = plan(ROOT, request_data, PROCESSES)
+                        preview = plan(ROOT, request_data, set(PROCESSES)|(CLUSTER.active() if CLUSTER else set()))
                         token = uuid.uuid4().hex
                         CLEANUP_PLANS[token] = {'request':request_data, 'expires':now+600,'user':self.user['id'],'session':self.user['token']}
                         return self.send_json({k:v for k,v in preview.items() if k!='_paths'} | {'token':token})
@@ -464,7 +675,10 @@ class Handler(BaseHTTPRequestHandler):
                         raise ValueError('请先查看清理范围并明确确认；确认方案十分钟后过期')
                     authorize_cleanup(self.user,entry['request'],states(ROOT))
                     CLEANUP_PLANS.pop(request_data['token'])
-                    return self.send_json(execute(ROOT, entry['request'], PROCESSES))
+                    running=set(PROCESSES)|(CLUSTER.active() if CLUSTER else set())
+                    plan(ROOT,entry['request'],running)
+                    if CLUSTER and entry['request']['action']=='delete':CLUSTER.deleted(entry['request']['job_ids'])
+                    return self.send_json(execute(ROOT, entry['request'], running))
             if url.path == "/api/uploads/zip":
                 if self.user['role'] not in {'admin','user'}:raise Forbidden('当前账号无上传权限')
                 job = create("zip",self.user)
@@ -482,6 +696,7 @@ class Handler(BaseHTTPRequestHandler):
             job = JOBS / match[1]
             action = match[2]
             if action == 'preview-error':
+                if not AUTH.may_view(self.user,read(job/'status.json')):raise Forbidden('无权浏览此检查')
                 if not isinstance(request_data,dict):raise ValueError('Invalid preview error')
                 details={key:str(request_data.get(key,''))[:400] for key in ('message','resource','browser','attempts','status')}
                 print('Preview client error '+json.dumps({'study':job.name,**details},ensure_ascii=False),flush=True)
@@ -540,6 +755,7 @@ class Handler(BaseHTTPRequestHandler):
                     if status["state"] not in ACTIVE | {"ready"}:
                         raise ValueError("任务已经结束")
                     update(job, state="cancelled")
+                    if CLUSTER:CLUSTER.cancel(job)
                     process = PROCESSES.get(job.name)
                     if process:stop_process(process)
                     else:finish_update(job,False,'本次更新已取消，保留上一版结果')
@@ -610,11 +826,21 @@ if __name__ == "__main__":
     if not AUTH.users():raise RuntimeError('须先使用 auth.py 初始化管理员账号')
     from resource_control import setup
     RESOURCES = setup(ROOT.parent/'run')
+    # Only our private, interrupted transfer staging directories are removed.
+    for pending in JOBS.glob('.preview-import-*'):
+        if re.fullmatch(r'\.preview-import-[a-z0-9_]{8}',pending.name) and not pending.is_symlink() and pending.is_dir() and pending.resolve().parent==JOBS.resolve():
+            shutil.rmtree(pending)
+    if CONFIG.get('cluster'):
+        from cluster_bridge import ClusterBridge
+        CLUSTER=ClusterBridge(sys.modules[__name__],CONFIG['cluster'])
     with LOCK:
         for path in JOBS.glob("*/status.json"):
             if read(path)["state"] in ACTIVE:
+                if CLUSTER and CLUSTER.recoverable(path.parent):continue
+                if CLUSTER:CLUSTER.cancel(path.parent)
                 if not finish_update(path.parent,False,'服务重启，已恢复上一版结果'):update(path.parent, state="failed", error="上次服务退出时任务中断，输入文件已保留")
     threading.Thread(target=work, daemon=True).start()
+    if CLUSTER:CLUSTER.start()
     if args.unix_socket:
         class UnixHTTPServer(BoundedThreads, socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
             daemon_threads = True
@@ -634,5 +860,8 @@ if __name__ == "__main__":
     try:
         server.serve_forever()
     finally:
+        SERVER_STOPPING.set()
+        if CLUSTER:CLUSTER.stop_event.set()
         for process in list(PROCESSES.values()):
             stop_process(process)
+        if CLUSTER:CLUSTER.close()

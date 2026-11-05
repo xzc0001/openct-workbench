@@ -210,7 +210,7 @@ def infer(output, mode, selected_override=None, task_key=None):
     save(output / "inference.json", {"device": "cpu", "offline_guard": True, "tasks": records})
 
 
-def export(volume, geometry, output, mode, selected_override=None, partial=False):
+def export(volume, geometry, output, mode, selected_override=None, partial=False, capture_only=False):
     import numpy as np
     import SimpleITK as sitk
     import vtk
@@ -371,6 +371,9 @@ def export(volume, geometry, output, mode, selected_override=None, partial=False
     from progressive import publish
     publish(output,surfaces,packed_masks,candidates)
     if partial:
+        if capture_only:
+            native=geometry.get('original_geometry',geometry)
+            return {'schema':1,'selected':requested,'models':surfaces,'masks':packed_masks,'nodules':candidates,'missing':missing_structures,'canonical_geometry':geometry,'native_geometry':native}
         from progressive import cache_export
         cache_export(output,requested,surfaces,packed_masks,candidates,missing_structures)
         return
@@ -434,7 +437,7 @@ def export(volume, geometry, output, mode, selected_override=None, partial=False
 
 
 
-def run():
+def prepare_run():
     status = json.loads((JOB/"status.json").read_text(encoding="utf-8"))
     series = next(s for s in json.loads((JOB/"inventory.json").read_text(encoding="utf-8"))["series"] if s["id"] == status["series_id"])
     output = JOB/"output"
@@ -468,6 +471,14 @@ def run():
     gc.collect()
     from resource_control import validate_native_workload
     validate_native_workload(status.get('structures',[]), geometry)
+    return geometry
+
+
+def run():
+    from progressive import ready_structures
+    geometry=prepare_run()
+    status=json.loads((JOB/'status.json').read_text(encoding='utf-8'))
+    output=JOB/'output'
     from structures import resolve,inference_plan
     selected,_=resolve(status)
     tasks=inference_plan(selected,status['mode']); completed=set(); published=set()
@@ -477,7 +488,7 @@ def run():
         child=subprocess.run([sys.executable,str(ROOT/'worker.py'),command,str(JOB),*extra],env=env,check=False)
         if child.returncode:
             report=json.loads((JOB/'progress.json').read_text(encoding='utf-8'))
-            raise RuntimeError(report.get('error','本地重建阶段未完成'))
+            raise RuntimeError(report.get('error') or '本地重建阶段未完成，请检查任务日志')
     for index,task in enumerate(tasks):
         from progressive import set_phase
         set_phase(output,'segmenting',task=task[1],mode=status['mode'],label=task[3])
@@ -518,6 +529,16 @@ if __name__ == "__main__":
     try:
         if sys.argv[1] == "scan":
             scan()
+        elif sys.argv[1] == 'cluster_prepare':
+            prepare_run()
+            status=json.loads((JOB/'status.json').read_text(encoding='utf-8'))
+            if 'suspects' in status.get('structures',[]):
+                from cluster_publication import prepare_candidate_inputs
+                prepare_candidate_inputs(JOB)
+            progress('queued',10,'等待可用的计算节点')
+        elif sys.argv[1] == 'cluster_apply':
+            from cluster_publication import apply_event
+            apply_event(JOB,os.environ['WORKBENCH_CLUSTER_EVENT_ID'])
         elif sys.argv[1] == "run":
             run()
         elif sys.argv[1] == 'infer':
@@ -537,6 +558,7 @@ if __name__ == "__main__":
         else:
             raise ValueError("未知处理指令")
     except Exception as error:
-        progress("failed", 0, "处理失败", error=str(error)[:1200])
+        detail = str(error).strip() or f'{type(error).__name__}（请查看任务日志）'
+        progress("failed", 0, "处理失败", error=detail[:1200])
         traceback.print_exc()
         sys.exit(1)

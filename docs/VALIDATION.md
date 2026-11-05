@@ -3,6 +3,36 @@
 This record describes the sanitized foundation, with synthetic tests only.
 It does not certify clinical performance or a fresh installation on every OS.
 
+## 2026-11-05 update
+
+- Release allowlist: 152 UTF-8 files, including 13 Wiki Markdown files (11 content
+  pages, sidebar and footer); all 86 Python source files parsed successfully.
+- Workbench: 130 tests, 128 passed and 2 platform-limited skips, in approximately
+  102 seconds. Cluster: 40 tests, 39 passed and 1 platform-limited skip, in
+  approximately 21 seconds. The final complete runs passed.
+- The original online-preview fixture lacked study metadata required by the new
+  access checks. The synthetic fixture was corrected without relaxing access
+  control. A transient Windows saturated-handler health probe failed in one
+  earlier run; its isolated rerun and the final complete suite passed.
+- Additional Node.js contracts for video lifecycle and volume sampling/memory
+  budget passed. Browser rendering, final printer output and native node DLL
+  execution were not validated as part of this publication.
+- Clean-source bootstrap, random administrator initialization, health/login and
+  anonymous denial of job, guest-management and node-management endpoints passed.
+- Source policy checks, Gitleaks 8.30.1 and a private 74-term local-identifier
+  comparison found no sensitive data in the 152 release files. Wiki text also
+  passed its independent source scan and internal page-link checks.
+- Verification used an existing Python 3.13 dependency environment plus isolated
+  cryptography test dependencies; no clinical studies or deployed services were
+  changed. This does not prove a fresh installation on every supported platform.
+- Before pushing, staged contents and reachable Git history are checked again;
+  remote commit/tree identity is verified after upload. Actual network targets,
+  certificates, keys, account state, engines and model packages stay excluded.
+
+GitHub Wiki publication uses a separate repository and requires an initial page
+to have been created on GitHub. The complete reviewable source is included under
+`docs/wiki/` regardless of that initialization state.
+
 ## Checks completed before the first upload
 
 - Explicit allowlist: 91 UTF-8 source, template, notice and documentation files.

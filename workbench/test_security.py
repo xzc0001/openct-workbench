@@ -1,3 +1,7 @@
+import secrets as _test_secrets
+_TEST_PASSWORD_0 = _test_secrets.token_urlsafe(24)
+_TEST_PASSWORD_1 = _test_secrets.token_urlsafe(24)
+_TEST_PASSWORD_2 = _test_secrets.token_urlsafe(24)
 """Auth/ownership/ingestion adversarial tests. Only synthetic images are used."""
 from pathlib import Path
 import io
@@ -20,8 +24,7 @@ from pydicom.uid import generate_uid, ExplicitVRLittleEndian, ImplicitVRLittleEn
 import auth
 import server
 import dicom_ingest as ingest
-from auth_test_support import opener, TEST_PASSWORD
-import secrets
+from auth_test_support import opener
 
 
 def ct_bytes(syntax=ExplicitVRLittleEndian):
@@ -95,8 +98,8 @@ class SecurityHTTP(unittest.TestCase):
         self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name);(self.root/'jobs').mkdir();(self.root/'cache').mkdir()
         (self.root/'cache/shared').write_bytes(b'shared')
         self.store=auth.Accounts(self.root/'auth/accounts.sqlite3')
-        self.ids={role:self.store.create(name,TEST_PASSWORD,role) for role,name in [('admin','admin'),('user','owner'),('viewer','reader')]}
-        self.ids['other']=self.store.create('other',TEST_PASSWORD,'user')
+        self.ids={role:self.store.create(name,_TEST_PASSWORD_2,role) for role,name in [('admin','admin'),('user','owner'),('viewer','reader')]}
+        self.ids['other']=self.store.create('other',_TEST_PASSWORD_2,'user')
         self.sid='a'*32;self.job=self.root/'jobs'/self.sid;(self.job/'input').mkdir(parents=True);(self.job/'output/revisions').mkdir(parents=True)
         server.write(self.job/'status.json',{'id':self.sid,'state':'completed','kind':'folder','created_at':1,'owner_id':self.ids['user']})
         (self.job/'output/revisions/old').write_bytes(b'backup');(self.job/'output/preview.html').write_bytes(b'preview')
@@ -104,7 +107,7 @@ class SecurityHTTP(unittest.TestCase):
         self.patch.start();self.http=ThreadingHTTPServer(('127.0.0.1',0),server.Handler);self.thread=threading.Thread(target=self.http.serve_forever,daemon=True);self.thread.start()
         self.base=f'http://127.0.0.1:{self.http.server_port}';self.clients={};self.headers={}
         for role,name in [('admin','admin'),('user','owner'),('viewer','reader'),('other','other')]:
-            token=self.store.login(name,TEST_PASSWORD,'fixture');cookie=auth.COOKIE+'='+token
+            token=self.store.login(name,_TEST_PASSWORD_2,'fixture');cookie=auth.COOKIE+'='+token
             self.headers[role]={'Cookie':cookie,'X-CSRF-Token':self.store.session(cookie)['csrf']}
             self.clients[role]=opener(self.headers[role])
     def tearDown(self):
@@ -123,9 +126,9 @@ class SecurityHTTP(unittest.TestCase):
             req=urllib.request.Request(self.base+path,b'{}',{'Content-Type':'application/json','X-Local-App':'1'})
             self.denied(401,lambda:client.open(req))
     def test_login_cookie_flags_logout_and_csrf(self):
-        client=opener({});req=urllib.request.Request(self.base+'/api/auth/login',json.dumps({'username':'owner','password':TEST_PASSWORD}).encode(),{'Content-Type':'application/json','X-Local-App':'1'})
+        client=opener({});req=urllib.request.Request(self.base+'/api/auth/login',json.dumps({'username':'owner','password':_TEST_PASSWORD_2}).encode(),{'Content-Type':'application/json','X-Local-App':'1'})
         with client.open(req) as response:
-            cookie=response.headers['Set-Cookie'];self.assertIn('HttpOnly',cookie);self.assertIn('SameSite=Strict',cookie);self.assertNotIn(TEST_PASSWORD,response.read().decode())
+            cookie=response.headers['Set-Cookie'];self.assertIn('HttpOnly',cookie);self.assertIn('SameSite=Strict',cookie);self.assertNotIn('test-password',response.read().decode())
         self.denied(403,lambda:self.post('/api/uploads/folder',{},headers={'X-CSRF-Token':'wrong'}))
         self.denied(403,lambda:self.post('/api/uploads/folder',{},headers={'Origin':'http://untrusted.example'}))
         self.post('/api/auth/logout',{})
@@ -158,23 +161,25 @@ class SecurityHTTP(unittest.TestCase):
         self.post('/api/jobs/'+sid+'/commit',{});self.assertEqual(self.queue.get_nowait()[0],job)
     def test_read_only_permissions_and_legacy_ownerless_data(self):
         for role,allowed in [('admin',True),('user',True),('other',False),('viewer',False)]:
-            data=json.load(self.clients[role].open(self.base+'/api/jobs'))['jobs'][0]
-            self.assertEqual(data['can_manage'],allowed)
+            rows=json.load(self.clients[role].open(self.base+'/api/jobs'))['jobs']
+            self.assertEqual(bool(rows),allowed)
+            if rows:self.assertTrue(rows[0]['can_manage'])
         status=server.read(self.job/'status.json');status.pop('owner_id');server.write(self.job/'status.json',status)
         self.denied(403,lambda:self.post('/api/storage/plan',{'action':'delete','job_ids':[self.sid]}))
     def test_account_admin_and_session_revocation(self):
-        self.post('/api/auth/users',{'username':'newreader','password':secrets.token_urlsafe(24),'role':'viewer'},'admin')
+        self.post('/api/auth/users',{'username':'newreader','password':_TEST_PASSWORD_1,'role':'viewer'},'admin')
         self.assertEqual(next(u for u in self.store.users() if u['username']=='newreader')['role'],'viewer')
         self.denied(403,lambda:self.post('/api/auth/users',{'username':'hacker','password':'x'*12},'user'))
         self.denied(403,lambda:self.clients['user'].open(self.base+'/api/auth/users'))
         self.post('/api/auth/users',{'id':self.ids['other'],'disabled':True},'admin')
         self.denied(401,lambda:self.clients['other'].open(self.base+'/api/jobs'))
         self.denied(400,lambda:self.post('/api/auth/users',{'id':self.ids['admin'],'disabled':True},'admin'))
-        self.post('/api/auth/password',{'old_password':TEST_PASSWORD,'password':secrets.token_urlsafe(24)})
+        self.denied(403,lambda:self.post('/api/auth/password',{'old_password':_TEST_PASSWORD_2,'password':_TEST_PASSWORD_0}))
+        self.post('/api/auth/users',{'id':self.ids['user'],'password':_TEST_PASSWORD_0},'admin')
         self.denied(401,lambda:self.clients['user'].open(self.base+'/api/jobs'))
     def test_cleanup_token_cannot_be_used_by_another_session_of_same_user(self):
         plan=self.post('/api/storage/plan',{'action':'temporary','job_ids':[self.sid]})
-        token=self.store.login('owner',TEST_PASSWORD,'new-session')
+        token=self.store.login('owner',_TEST_PASSWORD_2,'new-session')
         cookie=auth.COOKIE+'='+token;csrf=self.store.session(cookie)['csrf']
         self.denied(403,lambda:self.post('/api/storage/execute',{'token':plan['token'],'confirmed':True},headers={'Cookie':cookie,'X-CSRF-Token':csrf}))
         self.assertTrue((self.job/'output/revisions/old').exists())

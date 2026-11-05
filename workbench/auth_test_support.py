@@ -1,15 +1,14 @@
+import secrets as _test_secrets
+_TEST_PASSWORD_0 = _test_secrets.token_urlsafe(24)
 """Authenticated disposable clients for HTTP regression tests."""
 from auth import Accounts, COOKIE
 import urllib.request
-import secrets
-
-TEST_PASSWORD = secrets.token_urlsafe(24)
 
 
 def fixture(root):
     store=Accounts(root/'test-auth.sqlite3')
-    if not store.users():store.create('tester',TEST_PASSWORD,'admin')
-    token=store.login('tester',TEST_PASSWORD,'test')
+    if not store.users():store.create('tester',_TEST_PASSWORD_0,'admin')
+    token=store.login('tester',_TEST_PASSWORD_0,'test')
     cookie=COOKIE+'='+token
     principal=store.session(cookie)
     headers={'Cookie':cookie,'X-CSRF-Token':principal['csrf']}

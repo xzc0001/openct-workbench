@@ -9,6 +9,17 @@ outside the jobs/cache directories; `WORKBENCH_AUTH_DATABASE` can override it.
 Use an absolute database path for services. Keep credentials private on Windows
 with local ACLs; POSIX initialization uses restricted file modes.
 
+The updated access model restricts account administration and password changes
+to administrators. Upload users see their own studies; read-only users need
+explicit per-study authorization. Guest links are limited to selected studies,
+expire by default after seven days and can be revoked. See the Wiki source in
+`docs/wiki/Workflows-and-Access.md` before migrating existing accounts.
+
+Preview import/export and optional fixed-target transfers carry medical data.
+The current transfer sender uses HTTP; it does not add TLS automatically. Leave
+`transfer_target` unset unless the transport is protected by a separately reviewed
+encrypted network boundary. No original transfer target is distributed.
+
 The HTTP server binds to `127.0.0.1`, independently of the compatibility `host`
 configuration key. For internal sharing, place an authenticated HTTPS reverse
 proxy in front of it. Add the exact browser origin, for example

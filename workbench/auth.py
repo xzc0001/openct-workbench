@@ -14,6 +14,7 @@ import time
 from contextlib import contextmanager
 
 COOKIE = 'ct_session'
+GUEST_COOKIE = 'ct_guest'
 ROLES = {'admin': '管理员', 'user': '上传用户', 'viewer': '只读用户'}
 ITERATIONS = 600_000
 TTL = 12 * 3600
@@ -49,6 +50,11 @@ class Accounts:
                     token TEXT PRIMARY KEY, user_id TEXT NOT NULL, csrf TEXT NOT NULL,
                     expires REAL NOT NULL, touched REAL NOT NULL);
                 CREATE INDEX IF NOT EXISTS sessions_user ON sessions(user_id);
+                CREATE TABLE IF NOT EXISTS study_viewers (study_id TEXT NOT NULL, user_id TEXT NOT NULL, PRIMARY KEY(study_id,user_id));
+                CREATE INDEX IF NOT EXISTS study_viewers_user ON study_viewers(user_id);
+                CREATE TABLE IF NOT EXISTS guest_links (
+                    id TEXT PRIMARY KEY, token_hash TEXT UNIQUE NOT NULL, creator_id TEXT NOT NULL,
+                    study_ids TEXT NOT NULL, created REAL NOT NULL, expires REAL NOT NULL, revoked INTEGER NOT NULL DEFAULT 0);
             ''')
         if os.name != 'nt':
             os.chmod(self.path.parent, 0o700)
@@ -65,6 +71,32 @@ class Accounts:
     def users(self):
         with self.connect() as db:
             return [dict(row) for row in db.execute('SELECT id,username,role,disabled FROM users ORDER BY username')]
+
+    def viewer_options(self, study_id):
+        with self.connect() as db:
+            rows=db.execute("SELECT id,username FROM users WHERE role='viewer' AND disabled=0 ORDER BY username").fetchall()
+            granted={r['user_id'] for r in db.execute('SELECT user_id FROM study_viewers WHERE study_id=?',(study_id,))}
+            return [{'id':r['id'],'username':r['username'],'allowed':r['id'] in granted} for r in rows]
+
+    def owner_options(self):
+        with self.connect() as db:
+            return [dict(r) for r in db.execute("SELECT id,username FROM users WHERE role IN ('user','admin') AND disabled=0 ORDER BY username")]
+
+    def may_view(self, principal, status):
+        if can_manage(principal,status):return True
+        if principal['role']!='viewer':return False
+        with self.connect() as db:
+            return db.execute('SELECT 1 FROM study_viewers WHERE study_id=? AND user_id=?',(status['id'],principal['id'])).fetchone() is not None
+
+    def set_viewers(self, study_id, ids):
+        if not isinstance(ids,list) or len(ids)>500 or any(not isinstance(x,str) or not re.fullmatch(r'[a-f0-9]{32}',x) for x in ids) or len(ids)!=len(set(ids)):
+            raise ValueError('请选择有效的浏览账号')
+        with self.lock,self.connect() as db:
+            if ids:
+                rows=db.execute("SELECT id FROM users WHERE role='viewer' AND disabled=0 AND id IN ("+','.join('?' for _ in ids)+')',ids).fetchall()
+                if {r['id'] for r in rows}!=set(ids):raise ValueError('所选账号不存在或不是启用的浏览账号')
+            db.execute('DELETE FROM study_viewers WHERE study_id=?',(study_id,))
+            db.executemany('INSERT INTO study_viewers(study_id,user_id) VALUES(?,?)',[(study_id,x) for x in ids])
 
     def create(self, username, password, role='user'):
         if not isinstance(username, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{2,31}', username):
@@ -137,11 +169,43 @@ class Accounts:
             db.execute('UPDATE sessions SET touched=? WHERE token=? AND touched<?',(now,digest,now-60))
             return dict(row)
 
+    def create_guest_link(self, actor, study_ids, days=7):
+        if actor['role'] != 'admin':raise Forbidden('仅管理员可管理游客链接')
+        if not isinstance(study_ids,list) or not 1 <= len(study_ids) <= 100 or any(not isinstance(x,str) or not re.fullmatch(r'[a-f0-9]{32}',x) for x in study_ids) or len(set(study_ids)) != len(study_ids):
+            raise ValueError('请选择有效检查')
+        if type(days) is not int or not 1 <= days <= 365:raise ValueError('有效期须为 1 至 365 天')
+        token=secrets.token_urlsafe(32); now=time.time(); link_id=secrets.token_hex(16)
+        with self.lock,self.connect() as db:
+            db.execute('INSERT INTO guest_links VALUES(?,?,?,?,?,?,0)',(link_id,hashlib.sha256(token.encode()).hexdigest(),actor['id'],json.dumps(study_ids),now,now+days*86400))
+        return {'id':link_id,'token':token,'expires':now+days*86400}
+
+    def guest_link(self, token):
+        if not isinstance(token,str) or not re.fullmatch(r'[A-Za-z0-9_-]{43}',token):return None
+        with self.connect() as db:
+            row=db.execute('SELECT id,study_ids,expires FROM guest_links WHERE token_hash=? AND revoked=0 AND expires>?',(hashlib.sha256(token.encode()).hexdigest(),time.time())).fetchone()
+        return {'id':row['id'],'study_ids':json.loads(row['study_ids']),'expires':row['expires']} if row else None
+
+    def guest_from_cookie(self, cookie):
+        try:
+            jar=SimpleCookie();jar.load(cookie or '');return self.guest_link(jar[GUEST_COOKIE].value)
+        except (CookieError,KeyError):return None
+
+    def guest_links(self, actor):
+        if actor['role']!='admin':raise Forbidden('仅管理员可管理游客链接')
+        with self.connect() as db:
+            return [{**dict(row),'study_ids':json.loads(row['study_ids'])} for row in db.execute('SELECT id,study_ids,created,expires,revoked FROM guest_links ORDER BY created DESC LIMIT 200')]
+
+    def revoke_guest_link(self, actor, link_id):
+        if actor['role']!='admin':raise Forbidden('仅管理员可管理游客链接')
+        if not isinstance(link_id,str) or not re.fullmatch(r'[a-f0-9]{32}',link_id):raise ValueError('链接无效')
+        with self.lock,self.connect() as db:
+            if not db.execute('UPDATE guest_links SET revoked=1 WHERE id=?',(link_id,)).rowcount:raise ValueError('链接不存在')
+
     def logout(self, principal):
         with self.connect() as db:db.execute('DELETE FROM sessions WHERE token=?',(principal['token'],))
 
     def change(self, uid, request, actor):
-        if not isinstance(request,dict) or (actor['role']!='admin' and uid!=actor['id']):
+        if not isinstance(request,dict) or actor['role']!='admin':
             raise Forbidden('无权修改此账号')
         password = request.get('password')
         if password is not None:validate_password(password)

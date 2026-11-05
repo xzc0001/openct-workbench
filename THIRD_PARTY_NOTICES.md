@@ -28,6 +28,7 @@ No pretrained weights, Python environments or patient data are distributed here.
 | [SciPy](https://github.com/scipy/scipy) | Spatial and numerical processing | [BSD-3-Clause and bundled notices](https://github.com/scipy/scipy/blob/main/LICENSE.txt) |
 | [scikit-image](https://github.com/scikit-image/scikit-image) | Region processing | [License collection](https://github.com/scikit-image/scikit-image/blob/main/LICENSE.txt) |
 | [Pillow](https://github.com/python-pillow/Pillow) | Image processing | [HPND and bundled notices](https://github.com/python-pillow/Pillow/blob/main/LICENSE) |
+| [cryptography](https://github.com/pyca/cryptography) | Cluster certificates, signatures and cryptographic verification | [Apache-2.0 or BSD-3-Clause](https://github.com/pyca/cryptography/blob/main/LICENSE) |
 
 ## Optional tools, not bundled
 
@@ -38,6 +39,9 @@ No pretrained weights, Python environments or patient data are distributed here.
 - [Python](https://www.python.org/), [Node.js](https://nodejs.org/),
   [systemd](https://systemd.io/) and Git are supplied by the deployment environment;
   their terms remain applicable.
+- [Playwright](https://github.com/microsoft/playwright): optional synthetic browser
+  testing, [Apache-2.0](https://github.com/microsoft/playwright/blob/main/LICENSE).
+  Neither its package nor browser binaries are redistributed in this repository.
 
 ## Weights, tasks and acknowledgements
 

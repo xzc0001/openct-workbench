@@ -11,7 +11,7 @@
 <body>
 <header>
  <h1>影像预览</h1><span id="summary">正在加载</span>
- <div class="header-actions"><button id="grid">四宫格</button><button id="about">检查信息</button><button id="capture">截图</button></div>
+ <div class="header-actions"><button id="grid">四宫格</button><button id="about">检查信息</button><button id="capture">截图</button><button id="print-open" disabled>打印排版</button></div>
 </header>
 <main>
  <section id="workspace" aria-label="四宫格影像预览">
@@ -67,6 +67,7 @@
      <label class="check"><input id="rotation-momentum" type="checkbox">旋转动量</label>
      <label class="field range-field">旋转速度<output id="rotation-speed-value">10°/s</output><input id="rotation-speed" aria-label="旋转速度" type="range" min="1" max="60" value="10"></label>
      <label class="field">旋转中心<select id="rotation-center"><option value="view">视图中心</option><option value="model">模型中心</option><option value="focus">定位点</option></select></label>
+     <div class="field-action"><button id="record-three" aria-pressed="false" disabled>录制三维</button><output id="record-status" class="muted" aria-live="polite"></output></div>
     </section>
    </section>
    <section id="controls-position" role="tabpanel" aria-labelledby="tab-position" hidden>
@@ -82,6 +83,21 @@
 </main>
 <footer><span id="status">正在加载影像</span><span id="resource-status">离线预览</span></footer>
 <div id="loading">正在加载影像与模型</div>
+<section id="print-composer" class="print-composer" aria-label="打印排版" hidden>
+ <div class="print-heading"><h2>打印排版</h2><button id="print-close" type="button">关闭</button></div>
+ <div class="print-actions"><button id="print-add" type="button">添加当前视角</button><span id="print-count">0 / 9</span></div>
+ <div id="print-views" class="print-views"></div>
+ <h3>页眉</h3><div class="print-fields">
+  <label>机构名称<input id="print-institution" autocomplete="off" type="text" maxlength="80"></label>
+  <label>机构标识<input id="print-logo" type="file" accept="image/png,image/jpeg,image/webp"></label>
+  <label>患者姓名<input id="print-patient" autocomplete="off" type="text" maxlength="80"></label>
+  <label>性别<input id="print-sex" autocomplete="off" type="text" maxlength="20"></label>
+  <label>年龄<input id="print-age" autocomplete="off" type="text" maxlength="20"></label>
+  <label>检查号<input id="print-id" autocomplete="off" type="text" maxlength="80"></label>
+  <label>检查日期<input id="print-date" autocomplete="off" type="date"></label>
+ </div><div class="print-actions"><button id="print-output" type="button" disabled>打印 A4</button><span id="print-message" role="status"></span></div>
+</section>
+<section id="print-sheet" aria-label="A4 打印页" hidden></section>
 <dialog id="details"><div class="dialog-heading"><h2>检查信息</h2><button id="close-details">关闭</button></div><p id="source-info"></p><p id="method"></p><p>自动分割结果待人工复核。候选区域、肋骨编号与人工标记均不代表诊断结论。</p><p>横切图使用源 CT 像素；冠状位、矢状位按物理坐标重建。分割边界来自处理网格，并映射至源影像。</p><p>完整表面未经几何平滑或简化，轻量与标准表面用于浏览。柔和光照仅改变显示。</p><p>几何外扩参考不等同于手术安全切缘，不自动确定术式或可切除性。</p><p>肺段与骨折自动定位未配置专用模型。</p></dialog>
 <script>__THREE__</script><script>__ORBIT__</script>__BINARY_ASSETS__<script id="sceneData" type="application/json">__SCENE_DATA__</script><script id="ctData" type="application/json">__CT_DATA__</script><script id="volumeRoiData" type="application/json">__VOLUME_ROIS__</script><script>__LOADER__</script><script>__UI__</script><script>__VOLUME_RENDERER__</script><script>__PERFORMANCE__</script><script>__INTERACTIONS__</script><script>__PLACEHOLDERS__</script><script>__PROGRESSIVE__</script><script>__APP__</script>
 </body>
